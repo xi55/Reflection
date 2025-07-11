@@ -1,17 +1,18 @@
-cmake_minimum_required(VERSION 3.10)
-project(Test)
+cmake_minimum_required(VERSION 3.5)
+project(Reflection)
 
-# 使用 C++17 标准
-# todo: 兼容c++11, 结构体
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED True)
+# 设置C++11标准
+set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-add_definitions(-fpermissive)
+# 添加编译选项
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra")
 
-include_directories(${CMAKE_SOURCE_DIR})
+# 添加可执行文件
+add_executable(Test
+    main.cpp
+    Reflection.cpp
+)
 
-file(GLOB SOURCES ${CMAKE_SOURCE_DIR}/*.cpp)
-
-add_executable(Test ${SOURCES})
-
-target_link_libraries(Test pthread)
+# 包含头文件目录
+target_include_directories(Test PRIVATE .)
