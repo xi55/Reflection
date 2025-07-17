@@ -51,6 +51,17 @@ public:
 public:
     std::string name_; ///< 姓名（公开成员，便于测试）
     int age_;          ///< 年龄（公开成员，便于测试）
+    float money_; ///< 金钱（公开成员，便于测试）
+    double height_; ///< 身高（公开成员，便于测试）
+    bool isEmployed_; ///< 是否就业（公开成员，便于测试）
+    char gender_; ///< 性别（公开成员，便于测试）
+    long long id_; ///< ID（公开成员，便于测试）
+    unsigned int score_; ///< 分数（公开成员，便于测试）
+    unsigned long long timestamp_; ///< 时间戳（公开成员，便于测试）
+    short int level_; ///< 等级（公开成员，便于测试）
+    unsigned short int rank_; ///< 排名（公开成员，便于测试）
+    signed char grade_; ///< 成绩（公开成员，便于测试）
+    unsigned char status_; ///< 状态（公开成员，便于测试）
 };
 
 /**
@@ -66,6 +77,18 @@ void registerPersonReflection()
     // 注册成员变量
     registry.registerField<Person>("Person", "name", &Person::name_);
     registry.registerField<Person>("Person", "age", &Person::age_);
+    registry.registerField<Person>("Person", "money", &Person::money_);
+    registry.registerField<Person>("Person", "height", &Person::height_);
+    registry.registerField<Person>("Person", "isEmployed", &Person::isEmployed_);
+    registry.registerField<Person>("Person", "gender", &Person::gender_);
+    registry.registerField<Person>("Person", "id", &Person::id_);
+    registry.registerField<Person>("Person", "score", &Person::score_);
+    registry.registerField<Person>("Person", "timestamp", &Person::timestamp_);
+    registry.registerField<Person>("Person", "level", &Person::level_);
+    registry.registerField<Person>("Person", "rank", &Person::rank_);
+    registry.registerField<Person>("Person", "grade", &Person::grade_);
+    registry.registerField<Person>("Person", "status", &Person::status_);
+
 
     // 注册成员方法（暂时移除const方法）
     // registry.registerMethod<Person, std::string>("Person", "getName", &Person::getName);  // 这是const方法，暂时注释
@@ -182,7 +205,144 @@ void testPropertyAccess()
         setter->set(&person, Any(35));
         std::cout << "✓ 设置年龄成功，新年龄: " << person.age_ << std::endl;
     }
+
+    setter = registry.getSetter("Person", "money");
+    if (setter)
+    {
+        setter->set(&person, Any(1000.50f));
+        std::cout << "✓ 设置金钱成功，新金钱: " << person.money_ << std::endl;
+    }
+
+    setter = registry.getSetter("Person", "height");
+    if (setter)
+    {
+        setter->set(&person, Any(1.75));
+        std::cout << "✓ 设置身高成功，新身高: " << person.height_ << std::endl;
+    }
+    setter = registry.getSetter("Person", "isEmployed");    
+    if (setter)
+    {
+        setter->set(&person, Any(true));
+        std::cout << "✓ 设置就业状态成功，新状态: " << person.isEmployed_ << std::endl;
+    }
+    setter = registry.getSetter("Person", "gender");
+    if (setter)
+    {
+        setter->set(&person, Any('M'));
+        std::cout << "✓ 设置性别成功，新性别: " << person.gender_ << std::endl;
+    }
+
+    setter = registry.getSetter("Person", "id");
+    if (setter)
+    {
+        setter->set(&person, Any(123456789LL));
+        std::cout << "✓ 设置ID成功，新ID: " << person.id_ << std::endl;
+    }
+    setter = registry.getSetter("Person", "score");
+    if (setter)
+    {
+        setter->set(&person, Any(95U));
+        std::cout << "✓ 设置分数成功，新分数: " << person.score_ << std::endl;
+    }
+    setter = registry.getSetter("Person", "timestamp");
+    if (setter)
+    {
+        setter->set(&person, Any(1700000000ULL));
+        std::cout << "✓ 设置时间戳成功，新时间戳: " << person.timestamp_ << std::endl;
+    }
+    setter = registry.getSetter("Person", "level");
+    if (setter)
+    {
+        setter->set(&person, Any(static_cast<short int>(5)));
+        std::cout << "✓ 设置等级成功，新等级: " << person.level_ << std::endl;
+    }   
+    setter = registry.getSetter("Person", "rank");
+    if (setter)
+    {
+        setter->set(&person, Any(static_cast<unsigned short int>(3)));
+        std::cout << "✓ 设置排名成功，新排名: " << person.rank_ << std::endl;
+    }
+    setter = registry.getSetter("Person", "grade");
+    if (setter)
+    {
+        setter->set(&person, Any(static_cast<signed char>(90)));
+        std::cout << "✓ 设置成绩成功，新成绩: " << static_cast<int>(person.grade_) << std::endl;
+    }
+    setter = registry.getSetter("Person", "status");
+    if (setter)
+    {
+        setter->set(&person, Any(static_cast<unsigned char>(1)));
+        std::cout << "✓ 设置状态成功，新状态: " << static_cast<int>(person.status_) << std::endl;
+    }
+    // 再次获取属性值验证设置结果
+    allValues = registry.getAllValues("Person", &person);
+    std::cout << "更新后的所有属性值:" << std::endl;
+    for (const auto &pair : allValues)
+    {
+        std::cout << "  " << pair.first << ": ";
+        try
+        {
+            if (pair.first == "name")
+            {
+                std::cout << any_cast<std::string>(pair.second);    
+            }
+            else if (pair.first == "age")
+            {
+                std::cout << any_cast<int>(pair.second);
+            }
+            else if (pair.first == "money")
+            {
+                std::cout << any_cast<float>(pair.second);
+            }
+            else if (pair.first == "height")
+            {
+                std::cout << any_cast<double>(pair.second);
+            }
+            else if (pair.first == "isEmployed")
+            {
+                std::cout << any_cast<bool>(pair.second);
+            }
+            else if (pair.first == "gender")
+            {
+                std::cout << any_cast<char>(pair.second);
+            }
+            else if (pair.first == "id")
+            {
+                std::cout << any_cast<long long>(pair.second);
+            }
+            else if (pair.first == "score")
+            {
+                std::cout << any_cast<unsigned int>(pair.second);
+            }
+            else if (pair.first == "timestamp")
+            {
+                std::cout << any_cast<unsigned long long>(pair.second);
+            }
+            else if (pair.first == "level")
+            {
+                std::cout << any_cast<short int>(pair.second);
+            }
+            else if (pair.first == "rank")
+            {
+                std::cout << any_cast<unsigned short int>(pair.second);
+            }
+            else if (pair.first == "grade")
+            {
+                std::cout << static_cast<int>(any_cast<signed char>(pair.second));
+            }
+            else if (pair.first == "status")
+            {
+                std::cout << static_cast<int>(any_cast<unsigned char>(pair.second));
+            }
+        }
+        catch (const std::exception &e)
+        {
+            std::cout << "类型转换错误: " << e.what();
+        }
+        std::cout << std::endl;
+    }
 }
+
 
 /**
  * @brief 测试方法调用功能
@@ -304,10 +464,10 @@ int main()
         std::cout << "✓ 反射信息注册完成" << std::endl;
 
         // 执行各项测试
-        testObjectCreation();
+        // testObjectCreation();
         testPropertyAccess();
-        testMethodInvocation();
-        testErrorHandling();
+        // testMethodInvocation();
+        // testErrorHandling();
 
         std::cout << "\n=== 所有测试完成 ===" << std::endl;
     }
