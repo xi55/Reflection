@@ -2,6 +2,10 @@
 #include <iostream>
 #include <string>
 
+#if defined(_WIN64) || defined(_WIN32)
+#include <windows.h>
+#endif
+
 using namespace Evently;
 
 /**
@@ -48,6 +52,21 @@ public:
         return greeting + ", 我是 " + name_;
     }
 
+    void TestConstMethod() const
+    {
+        std::cout << "这是一个const方法测试。" << std::endl;
+    }
+
+    void TestConstMethodWithParam(int value) const
+    {
+        std::cout << "这是一个带参数的const方法测试，参数值: " << value << std::endl;
+    }
+
+    int TestConstMethodWithReturn(int a) const
+    {
+        return a;
+    }
+
 public:
     std::string name_; ///< 姓名（公开成员，便于测试）
     int age_;          ///< 年龄（公开成员，便于测试）
@@ -62,6 +81,16 @@ public:
     unsigned short int rank_; ///< 排名（公开成员，便于测试）
     signed char grade_; ///< 成绩（公开成员，便于测试）
     unsigned char status_; ///< 状态（公开成员，便于测试）
+
+    const int constantValue_ = 42; ///< 常量值（测试const成员变量）
+    const std::string constantString_ = "常量字符串"; ///< 常量字符串（测试const成员变量）
+    const double constantDouble_ = 3.14159; ///< 常量双精度浮点数（测试const成员变量）
+    const bool constantBool_ = true; ///< 常量布尔值（测试const成员变量）
+    const char constantChar_ = 'C'; ///< 常量字符（测试const成员变量）
+    const long long constantLongLong_ = 1234567890LL; ///< 常量长长整型（测试const成员变量）
+    const unsigned int constantUnsignedInt_ = 987654321U; ///< 常量无符号整型（测试const成员变量）
+    const float constantFloat_ = 2.71828f; ///< 常量浮点数（测试const成员变量）
+
 };
 
 /**
@@ -89,6 +118,16 @@ void registerPersonReflection()
     registry.registerField<Person>("Person", "grade", &Person::grade_);
     registry.registerField<Person>("Person", "status", &Person::status_);
 
+    //注册常量成员变量
+    registry.registerField<Person>("constantValue", &Person::constantValue_);
+    registry.registerField<Person>("constantString", &Person::constantString_);
+    registry.registerField<Person>("constantDouble", &Person::constantDouble_);
+    registry.registerField<Person>("constantBool", &Person::constantBool_);
+    registry.registerField<Person>("constantChar", &Person::constantChar_);
+    registry.registerField<Person>("constantLongLong", &Person::constantLongLong_);
+    registry.registerField<Person>("constantUnsignedInt", &Person::constantUnsignedInt_);
+    registry.registerField<Person>("constantFloat", &Person::constantFloat_);
+
 
     // 注册成员方法（暂时移除const方法）
     // registry.registerMethod<Person, std::string>("Person", "getName", &Person::getName);  // 这是const方法，暂时注释
@@ -102,6 +141,11 @@ void registerPersonReflection()
     // 注册类工厂（支持默认构造和带参数构造）
     registry.registerClass<Person>("Person");
     registry.registerClass<Person, std::string, int>("PersonWithParams", std::string("默认姓名"), 25);
+
+    // 注册const成员方法
+    registry.registerMethod<Person, void>("Person", "TestConstMethod", &Person::TestConstMethod);
+    registry.registerMethod<Person, void, int>("Person", "TestConstMethodWithParam", &Person::TestConstMethodWithParam);
+    registry.registerMethod<Person, int, int>("Person", "TestConstMethodWithReturn", &Person::TestConstMethodWithReturn);
 }
 
 /**
@@ -450,11 +494,103 @@ void testErrorHandling()
     std::cout << "✓ Person类的注册名称: " << className << std::endl;
 }
 
+
+/** 
+ * @brief 测试const成员变量访问
+*/
+void testConstMemberAccess()
+{
+    std::cout << "\n=== 测试const成员变量访问 ===" << std::endl;
+
+    auto &registry = ReflectionRegistry::getInstance();
+    Person person;
+
+    try
+    {
+        // 获取const成员变量值（保持const限定）
+        Any constValue = registry.getValues("Person", "constantValue", &person);
+        auto constVal = any_cast<const int>(constValue);
+        constVal += 10; // 更新constVal以反映修改后的值
+        std::cout << "✓ constantValue: " << constVal << std::endl;
+
+        auto setter = registry.getSetter("Person", "constantValue");
+        if (setter) {
+            std::cout << "✗ 错误：不应为 const 成员暴露 setter" << std::endl;
+        } else {
+            std::cout << "✓ const 成员没有 setter（预期）" << std::endl;
+        }
+        Any constString = registry.getValues("Person", "constantString", &person);
+        std::cout << "✓ constantString: " << any_cast<std::string>(constString) << std::endl;
+
+        Any constDouble = registry.getValues("Person", "constantDouble", &person);
+        std::cout << "✓ constantDouble: " << any_cast<double>(constDouble) << std::endl;
+
+        Any constBool = registry.getValues("Person", "constantBool", &person);
+        std::cout << "✓ constantBool: " << any_cast<bool>(constBool) << std::endl;
+
+        Any constChar = registry.getValues("Person", "constantChar", &person);
+        std::cout << "✓ constantChar: " << any_cast<char>(constChar) << std::endl;
+
+        Any constLongLong = registry.getValues("Person", "constantLongLong", &person);
+        std::cout << "✓ constantLongLong: " << any_cast<long long>(constLongLong) << std::endl;
+
+        Any constUnsignedInt = registry.getValues("Person", "constantUnsignedInt", &person);
+        std::cout << "✓ constantUnsignedInt: " << any_cast<unsigned int>(constUnsignedInt) << std::endl;
+
+        Any constFloat = registry.getValues("Person", "constantFloat", &person);
+        std::cout << "✓ constantFloat: " << any_cast<float>(constFloat) << std::endl;
+    }
+    catch (const std::exception &e)
+    {
+        std::cout << "✗ 访问const成员变量失败: " << e.what() << std::endl;
+    }
+}
+
+
+/** 
+  * @brief 测试const成员方法调用
+*/
+void testConstMethodInvocation()
+{
+    std::cout << "\n=== 测试const成员方法调用 ===" << std::endl;
+
+    auto &registry = ReflectionRegistry::getInstance();
+    Person person("测试", 25);
+
+    try
+    {
+        // 调用无参数的const方法
+        Any result = registry.invokeMethod("Person", "TestConstMethod", &person, {});
+        std::cout << "✓ 成功调用TestConstMethod方法" << std::endl;
+
+        // 调用带参数的const方法
+        std::vector<Any> args = { Any(42) };
+        result = registry.invokeMethod("Person", "TestConstMethodWithParam", &person, args);
+        std::cout << "✓ 成功调用TestConstMethodWithParam方法" << std::endl;
+
+        // 调用带参数有返回值的const方法
+        std::vector<Any> returnArgs = { Any(55) };
+        result = registry.invokeMethod("Person", "TestConstMethodWithReturn", &person, returnArgs);
+        std::cout << "✓ 成功调用TestConstMethodWithReturn方法，返回值: " << any_cast<int>(result) << std::endl;
+
+    }
+    catch (const std::exception &e)
+    {
+        std::cout << "✗ 调用const成员方法失败: " << e.what() << std::endl;
+    }
+}
+
 /**
  * @brief 主函数
  */
 int main()
 {
+
+#if defined(_WIN64) || defined(_WIN32)
+    // 设置控制台输出为UTF-8编码，解决Windows控制台中文乱码问题
+    SetConsoleOutputCP(CP_UTF8);
+#endif
+
     std::cout << "=== C++11反射系统测试程序 ===" << std::endl;
 
     try
@@ -465,9 +601,12 @@ int main()
 
         // 执行各项测试
         // testObjectCreation();
-        testPropertyAccess();
+        // testPropertyAccess();
         // testMethodInvocation();
         // testErrorHandling();
+        // testConstMemberAccess();
+        testConstMethodInvocation();
+
 
         std::cout << "\n=== 所有测试完成 ===" << std::endl;
     }

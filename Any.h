@@ -30,7 +30,7 @@ namespace Evently
          */
         template <typename T>
         Any(const T &value)
-            : content_(new Holder<typename std::decay<T>::type>(value)) {}
+            : content_(new Holder<typename std::remove_reference<T>::type>(value)) {}
 
         /// 拷贝构造函数
         Any(const Any &other)
@@ -164,6 +164,24 @@ namespace Evently
     };
 
     /**
+     * @brief Any类型转换失败时抛出的异常
+     *
+     * 当any_cast尝试将Any对象转换为不匹配的类型时抛出此异常
+     */
+    class bad_any_cast : public std::bad_cast
+    {
+    public:
+        bad_any_cast(const std::string &message) : message_(message) {};
+
+        const char *what() const noexcept override
+        {
+            return message_.c_str();
+        }
+    private:
+        std::string message_;
+    };
+
+    /**
      * @brief 类型转换函数，将Any对象转换为指定类型
      * @tparam T 目标类型
      * @param operand 要转换的Any对象
@@ -173,9 +191,11 @@ namespace Evently
     template <typename T>
     T any_cast(const Any &operand)
     {
+        // std::cout << "any_cast目标类型: " << typeid(T).name() << ", 存储类型: " << operand.type().name() << std::endl;
         if (operand.type() != typeid(T))
         {
-            throw std::bad_cast();
+            std::string errMsg = "bad any cast from " + std::string(operand.type().name()) + " to " + std::string(typeid(T).name());
+            throw bad_any_cast(errMsg);
         }
         return static_cast<const Any::Holder<T> *>(operand.content_)->held;
     }
@@ -191,20 +211,6 @@ namespace Evently
     {
         return operand ? operand->cast<T>() : nullptr;
     }
-
-    /**
-     * @brief Any类型转换失败时抛出的异常
-     *
-     * 当any_cast尝试将Any对象转换为不匹配的类型时抛出此异常
-     */
-    class bad_any_cast : public std::bad_cast
-    {
-    public:
-        const char *what() const noexcept override
-        {
-            return "bad any cast";
-        }
-    };
 
 } // namespace Evently
 

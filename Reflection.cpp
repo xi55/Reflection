@@ -36,6 +36,7 @@ namespace Evently
                                       std::unique_ptr<PropertySetterBase>,
                                       PairHash,
                                       PairEqual>();
+        setterWritable_ = std::unordered_map<std::pair<std::string, std::string>, bool, PairHash, PairEqual>();
         methods_ = std::unordered_map<std::pair<std::string, std::string>,
                                       std::unique_ptr<MethodInvokerBase>,
                                       PairHash,
@@ -48,9 +49,21 @@ namespace Evently
     PropertySetterBase *ReflectionRegistry::getSetter(const std::string &className,
                                                       const std::string &fieldName) const
     {
+        // 参数验证
+        if (className.empty() || fieldName.empty())
+        {
+            return nullptr;
+        }
         // 构造查找键值并在设置器映射中查找
         auto key = std::make_pair(className, fieldName);
         auto it = setters_.find(key);
+        // const 字段不可写，返回 nullptr 表示无 setter
+        auto writableIt = setterWritable_.find(key);
+        if (writableIt != setterWritable_.end() && !writableIt->second)
+        {
+            return nullptr;
+        }
+
         return it != setters_.end() ? it->second.get() : nullptr;
     }
 
