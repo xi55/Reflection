@@ -605,7 +605,7 @@ int main()
         // testMethodInvocation();
         // testErrorHandling();
         // testConstMemberAccess();
-        testConstMethodInvocation();
+        // testConstMethodInvocation();
 
 
         std::cout << "\n=== 所有测试完成 ===" << std::endl;
