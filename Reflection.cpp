@@ -4,6 +4,11 @@
 
 namespace Evently
 {
+    namespace
+    {
+        thread_local const ReflectionRegistry *tlsBatchOwner = nullptr;
+    }
+
     namespace detail
     {
         RegistrationQueue &RegistrationQueue::getInstance()
@@ -25,9 +30,19 @@ namespace Evently
                 std::lock_guard<std::mutex> lock(mutex_);
                 functions.swap(functions_);
             }
-            for (std::size_t index = 0; index < functions.size(); ++index)
+            try
             {
-                functions[index]();
+                for (std::size_t index = 0; index < functions.size(); ++index)
+                {
+                    functions[index]();
+                }
+            }
+            catch (...)
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                functions_.insert(functions_.end(), functions.begin(),
+                                  functions.end());
+                throw;
             }
         }
     }
@@ -59,6 +74,10 @@ namespace Evently
     std::shared_ptr<const ReflectionRegistry::RegistryData>
     ReflectionRegistry::snapshot() const
     {
+        if (tlsBatchOwner == this && batchData_)
+        {
+            return std::shared_ptr<const RegistryData>(batchData_);
+        }
         return std::atomic_load(&data_);
     }
 
@@ -72,6 +91,99 @@ namespace Evently
     void ReflectionRegistry::publish(const std::shared_ptr<RegistryData> &data)
     {
         std::atomic_store(&data_, std::shared_ptr<const RegistryData>(data));
+    }
+
+    ReflectionRegistry::WriteContext ReflectionRegistry::beginWrite()
+    {
+        WriteContext context;
+        if (tlsBatchOwner == this && batchData_)
+        {
+            context.data = batchData_;
+            context.batched = true;
+        }
+        else
+        {
+            context.lock = std::unique_lock<std::mutex>(writeMutex_);
+            context.data = copyData();
+            context.batched = false;
+        }
+        return context;
+    }
+
+    void ReflectionRegistry::endWrite(WriteContext &context)
+    {
+        if (!context.batched)
+        {
+            publish(context.data);
+        }
+    }
+
+    std::unique_lock<std::mutex> ReflectionRegistry::acquireBatchLock()
+    {
+        if (tlsBatchOwner != nullptr)
+        {
+            throw ReflectionError(ReflectionErrorCode::InvalidArgument,
+                                  "不允许嵌套注册批处理");
+        }
+        return std::unique_lock<std::mutex>(writeMutex_);
+    }
+
+    void ReflectionRegistry::startBatch()
+    {
+        if (batchData_)
+        {
+            throw ReflectionError(ReflectionErrorCode::InvalidArgument,
+                                  "注册批处理已经启动");
+        }
+        batchData_ = copyData();
+        tlsBatchOwner = this;
+    }
+
+    void ReflectionRegistry::commitBatch()
+    {
+        if (tlsBatchOwner != this || !batchData_)
+        {
+            throw ReflectionError(ReflectionErrorCode::InvalidArgument,
+                                  "没有可提交的注册批处理");
+        }
+        publish(batchData_);
+        tlsBatchOwner = nullptr;
+        batchData_.reset();
+    }
+
+    void ReflectionRegistry::abortBatch()
+    {
+        if (tlsBatchOwner == this)
+        {
+            tlsBatchOwner = nullptr;
+        }
+        batchData_.reset();
+    }
+
+    RegistrationBatch::RegistrationBatch(ReflectionRegistry &registry)
+        : registry_(&registry), lock_(registry.acquireBatchLock()),
+          committed_(false)
+    {
+        registry_->startBatch();
+    }
+
+    RegistrationBatch::~RegistrationBatch()
+    {
+        if (registry_ != nullptr && !committed_)
+        {
+            registry_->abortBatch();
+        }
+    }
+
+    void RegistrationBatch::commit()
+    {
+        if (registry_ == nullptr)
+        {
+            return;
+        }
+        registry_->commitBatch();
+        registry_ = nullptr;
+        committed_ = true;
     }
 
     void ReflectionRegistry::ensureClass(RegistryData &data,
@@ -104,8 +216,8 @@ namespace Evently
             throw ReflectionError(ReflectionErrorCode::InvalidArgument,
                                   "类名不能为空");
         }
-        std::lock_guard<std::mutex> lock(writeMutex_);
-        std::shared_ptr<RegistryData> next = copyData();
+        WriteContext context = beginWrite();
+        std::shared_ptr<RegistryData> next = context.data;
         auto it = next->classNames.find(type);
         if (it != next->classNames.end() && it->second != className)
         {
@@ -115,7 +227,7 @@ namespace Evently
         checkClassNameOwner(*next, type, className);
         next->classNames[type] = className;
         ensureClass(*next, className);
-        publish(next);
+        endWrite(context);
     }
 
     void ReflectionRegistry::addField(
@@ -133,8 +245,8 @@ namespace Evently
             throw ReflectionError(ReflectionErrorCode::InvalidArgument,
                                   "字段设置器不能为空");
         }
-        std::lock_guard<std::mutex> lock(writeMutex_);
-        std::shared_ptr<RegistryData> next = copyData();
+        WriteContext context = beginWrite();
+        std::shared_ptr<RegistryData> next = context.data;
         checkClassNameOwner(*next, type, className);
         auto key = std::make_pair(className, fieldName);
         if (next->setters.find(key) != next->setters.end())
@@ -144,7 +256,7 @@ namespace Evently
         }
         next->setters[key] = setter;
         ensureClass(*next, className);
-        publish(next);
+        endWrite(context);
     }
 
     void ReflectionRegistry::addMethod(
@@ -162,8 +274,8 @@ namespace Evently
             throw ReflectionError(ReflectionErrorCode::InvalidArgument,
                                   "方法调用器不能为空");
         }
-        std::lock_guard<std::mutex> lock(writeMutex_);
-        std::shared_ptr<RegistryData> next = copyData();
+        WriteContext context = beginWrite();
+        std::shared_ptr<RegistryData> next = context.data;
         checkClassNameOwner(*next, type, className);
         auto key = std::make_pair(className, methodName);
         std::vector<std::shared_ptr<MethodInvokerBase>> &candidates =
@@ -185,7 +297,7 @@ namespace Evently
         candidates.push_back(invoker);
         next->methodNames[className].insert(methodName);
         ensureClass(*next, className);
-        publish(next);
+        endWrite(context);
     }
 
     void ReflectionRegistry::addConstructor(
@@ -202,8 +314,8 @@ namespace Evently
             throw ReflectionError(ReflectionErrorCode::InvalidArgument,
                                   "构造函数不能为空");
         }
-        std::lock_guard<std::mutex> lock(writeMutex_);
-        std::shared_ptr<RegistryData> next = copyData();
+        WriteContext context = beginWrite();
+        std::shared_ptr<RegistryData> next = context.data;
         checkClassNameOwner(*next, type, className);
         std::vector<std::shared_ptr<ConstructorInvokerBase>> &candidates =
             next->constructors[className];
@@ -221,7 +333,7 @@ namespace Evently
         }
         candidates.push_back(constructor);
         ensureClass(*next, className);
-        publish(next);
+        endWrite(context);
     }
 
     void ReflectionRegistry::addFactory(
@@ -238,8 +350,8 @@ namespace Evently
             throw ReflectionError(ReflectionErrorCode::InvalidArgument,
                                   "对象工厂不能为空");
         }
-        std::lock_guard<std::mutex> lock(writeMutex_);
-        std::shared_ptr<RegistryData> next = copyData();
+        WriteContext context = beginWrite();
+        std::shared_ptr<RegistryData> next = context.data;
         checkClassNameOwner(*next, type, className);
         if (next->factories.find(className) != next->factories.end())
         {
@@ -248,12 +360,79 @@ namespace Evently
         }
         next->factories[className] = factory;
         ensureClass(*next, className);
-        publish(next);
+        endWrite(context);
+    }
+
+    bool ReflectionRegistry::unregisterClass(const std::string &className)
+    {
+        if (className.empty())
+        {
+            return false;
+        }
+
+        WriteContext context = beginWrite();
+        std::shared_ptr<RegistryData> next = context.data;
+        if (next->classNamesSet.find(className) == next->classNamesSet.end())
+        {
+            return false;
+        }
+
+        for (auto it = next->setters.begin(); it != next->setters.end();)
+        {
+            if (it->first.first == className)
+            {
+                it = next->setters.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
+        }
+        for (auto it = next->methods.begin(); it != next->methods.end();)
+        {
+            if (it->first.first == className)
+            {
+                it = next->methods.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
+        }
+        next->constructors.erase(className);
+        next->factories.erase(className);
+        next->methodNames.erase(className);
+        next->classNameOwners.erase(className);
+        next->classNamesSet.erase(className);
+        for (auto it = next->classNames.begin(); it != next->classNames.end();)
+        {
+            if (it->second == className)
+            {
+                it = next->classNames.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
+        }
+
+        endWrite(context);
+        return true;
+    }
+
+    void ReflectionRegistry::clear()
+    {
+        WriteContext context = beginWrite();
+        *context.data = RegistryData();
+        endWrite(context);
+        frozen_.store(false, std::memory_order_release);
     }
 
     void ReflectionRegistry::registerAll()
     {
+        RegistrationBatch batch(*this);
         detail::RegistrationQueue::getInstance().runAll();
+        batch.commit();
     }
 
     void ReflectionRegistry::freeze()

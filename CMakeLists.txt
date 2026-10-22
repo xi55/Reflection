@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(EventlyReflection VERSION 4.0.0 LANGUAGES CXX)
+project(EventlyReflection VERSION 4.1.0 LANGUAGES CXX)
 
 if(MSVC AND NOT BUILD_SHARED_LIBS)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" CACHE STRING "MSVC runtime library")
@@ -9,6 +9,7 @@ endif()
 set(EVENTLY_CXX_STANDARD "11" CACHE STRING "C++ standard: 11, 14, or 17")
 set_property(CACHE EVENTLY_CXX_STANDARD PROPERTY STRINGS 11 14 17)
 option(EVENTLY_BUILD_EXAMPLES "Build example programs" ON)
+option(EVENTLY_BUILD_BENCHMARKS "Build benchmarks" OFF)
 option(EVENTLY_BUILD_DOCS "Build Doxygen documentation" OFF)
 
 include(GNUInstallDirs)
@@ -61,6 +62,14 @@ if(EVENTLY_BUILD_EXAMPLES)
     )
     target_link_libraries(JsonSerializationExample PRIVATE evently_reflection)
     evently_target_defaults(JsonSerializationExample)
+endif()
+
+if(EVENTLY_BUILD_BENCHMARKS)
+    add_executable(ReflectionBenchmark
+        benchmarks/reflection_benchmark.cpp
+    )
+    target_link_libraries(ReflectionBenchmark PRIVATE evently_reflection)
+    evently_target_defaults(ReflectionBenchmark)
 endif()
 
 include(CTest)

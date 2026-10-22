@@ -17,8 +17,8 @@
   C++17 用 `-Standard 17`。构建目录是 `build\msvc-cxx14` / `build\msvc-cxx17`。
 - MSVC 没有 `/std:c++11`；CMake 的 `CXX_STANDARD 11` 在 MSVC 上不加 `/std` 参数，实际使用默认 C++14。真正的 C++11 门槛是 GCC 的 `-std=c++11`。
 - CMake 变量 `EVENTLY_CXX_STANDARD` 可取 `11/14/17`，默认 `11`；`CXX_EXTENSIONS OFF`。
-- 单测：`build\msvc-cxx14\ReflectionTests.exe --test Any`，或 `ctest --test-dir build\msvc-cxx14 -R reflection_ --output-on-failure`。测试组：`Any`、`Fields`、`Methods`、`Factory`、`Metadata`、`Functions`、`Qualifiers`、`Constructors`、`AutoRegistration`、`RegistrationErrors`、`ThreadSafety`，共 250+ 项断言（C++17 额外包含 `noexcept` 用例）。CTest 把核心测试和会执行并发读写的 `ThreadSafety` 分成两个独立进程，并运行 `JsonSerializationExample`。
-- `EVENTLY_BUILD_EXAMPLES` 控制 `JsonSerializationExample`；`examples/consumer` 是独立安装消费方示例，不在主构建中。
+- 单测：`build\msvc-cxx14\ReflectionTests.exe --test Any`，或 `ctest --test-dir build\msvc-cxx14 -R reflection_ --output-on-failure`。测试组：`Any`、`Fields`、`Methods`、`Factory`、`Metadata`、`Functions`、`Qualifiers`、`Constructors`、`AutoRegistration`、`RegistrationBatch`、`Lifecycle`、`RegistrationErrors`、`ThreadSafety`、`Clear`，共 250+ 项断言（C++17 额外包含 `noexcept` 用例）。CTest 把核心测试和会执行并发读写的 `ThreadSafety` 分成两个独立进程，并运行 `JsonSerializationExample`。
+- `EVENTLY_BUILD_EXAMPLES` 控制 `JsonSerializationExample`；`EVENTLY_BUILD_BENCHMARKS=ON` 构建 `ReflectionBenchmark`；`examples/consumer` 是独立安装消费方示例，不在主构建中。
 - 共享库：`scripts\build-msvc.ps1 -Standard 17 -Shared`，或 CMake `-DBUILD_SHARED_LIBS=ON`。共享库使用动态 CRT；静态库仍使用静态 CRT。
 - 文档：`cmake -S . -B build/docs -DEVENTLY_BUILD_DOCS=ON -DBUILD_TESTING=OFF`，然后 `cmake --build build/docs --target docs`。
 - 源文件是无 BOM 的 UTF-8，含中文注释和字符串；MSVC 的 `/utf-8` 已由 CMake 统一加到库和测试，并通过 `evently_reflection` 的 INTERFACE 选项传播给安装后的消费方，不要移除。
@@ -35,7 +35,9 @@
 - `registerClass` 使用 `ObjectFactorySelector` 选择工厂，避免两个分支同时实例化；无默认构造函数的 T 必须带构造参数注册。字段/方法/构造函数/工厂/类名重复注册默认抛 `ReflectionError(DuplicateRegistration)`。
 - 类名有所有权：同一个类名只能属于一个类型，不同类型同名抛 `ReflectionError(ClassNameConflict)`；同一类型可以通过 `registerClass<T>` 注册多个别名类名。
 - 注册中心使用 COW 快照：读操作通过 `std::atomic_load` 获取不可变快照，写入复制快照并由 `writeMutex_` 串行化。`freeze()` 只标记已经发布过快照，不会禁止后续注册；运行期仍可动态注册。`getSetter` 返回 `std::shared_ptr<PropertySetterBase>`，可以安全持有。
-- `ReflectionRegistry` 是单例且没有 `clear()`；测试使用不同类名隔离状态，不要重复注册同一签名。
+- `RegistrationBatch` 在生命周期内持有写锁并维护 draft 快照，`commit()` 才发布；析构未提交则回滚。`registerAll()` 内部使用它，批量期间读线程仍看到旧快照。不要在同一线程嵌套 batch。
+- `unregisterClass` / `clear` 也是 COW 写操作；已返回的 setter `shared_ptr` 仍有效，但插件代码卸载后的生命周期由调用方负责。
+- `ReflectionRegistry` 是单例；`clear()` 可以重置注册表，但测试仍应尽量使用唯一类名，避免依赖跨测试顺序。
 - `createInstance` 返回 `ObjectHandle`，未知类抛 `ReflectionError(ClassNotFound)`；`getSetter` 返回 `std::shared_ptr<PropertySetterBase>`，对缺失字段抛 `FieldNotFound`，对 const 字段抛 `FieldNotWritable`；`getValues`/`getAllValues`/`getMethodNames` 对缺失项抛错；用 `hasClass`/`hasField`/`hasMethod`/`isFieldWritable` 做非抛出查询。
 - 方法重载按参数数量和精确 `type_index` 匹配，不做隐式数值转换；`invokeMethod` 对 const 实例只允许 const 方法，非 const 方法会抛 `InvalidInstance`。`nullptr` 实例由 `std::nullptr_t` 重载处理，避免 `void*`/`const void*` 歧义。
 - ref-qualified 成员函数：`&`/`const &` 用普通实例，`&&`/`const &&` 必须通过 `RvalueInstance` 传入；`MethodInfo::refQualifier` 记录限定符。

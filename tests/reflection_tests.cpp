@@ -196,6 +196,30 @@ namespace
         int value_ = 0;
     };
 
+    class BatchObject
+    {
+    public:
+        int value_ = 0;
+    };
+
+    class RemovableObject
+    {
+    public:
+        int value_ = 0;
+    };
+
+    class MultiAliasObject
+    {
+    public:
+        int value_ = 0;
+    };
+
+    class ClearedObject
+    {
+    public:
+        int value_ = 0;
+    };
+
     EVENTLY_REGISTER_CLASS(AutoObject, "AutoObject")
     {
         Evently::ClassRegistration<AutoObject> registration("AutoObject");
@@ -913,6 +937,109 @@ namespace
         CHECK(registry.getConstructors("AutoObject").size() == 1u);
     }
 
+    void testRegistrationBatch()
+    {
+        ReflectionRegistry &registry = ReflectionRegistry::getInstance();
+
+        {
+            RegistrationBatch batch(registry);
+            registry.registerClassName<BatchObject>("BatchObject");
+            registry.registerField<BatchObject>("BatchObject", "value",
+                                                &BatchObject::value_);
+            registry.registerConstructor<BatchObject>("BatchObject");
+            batch.commit();
+        }
+        CHECK(registry.hasClass("BatchObject"));
+        CHECK(registry.hasField("BatchObject", "value"));
+        ObjectHandle batchObject = registry.createInstance("BatchObject");
+        CHECK(batchObject.get<BatchObject>() != nullptr);
+
+        bool duplicateCaught = false;
+        try
+        {
+            RegistrationBatch batch(registry);
+            registry.registerClassName<BatchObject>("BatchRollback");
+            registry.registerField<BatchObject>("BatchRollback", "value",
+                                                &BatchObject::value_);
+            registry.registerField<BatchObject>("BatchRollback", "value",
+                                                &BatchObject::value_);
+            batch.commit();
+        }
+        catch (const ReflectionError &error)
+        {
+            duplicateCaught =
+                error.code() == ReflectionErrorCode::DuplicateRegistration;
+        }
+        CHECK(duplicateCaught);
+        CHECK(!registry.hasClass("BatchRollback"));
+
+        bool nestedCaught = false;
+        try
+        {
+            RegistrationBatch outer(registry);
+            RegistrationBatch inner(registry);
+        }
+        catch (const ReflectionError &error)
+        {
+            nestedCaught = error.code() == ReflectionErrorCode::InvalidArgument;
+        }
+        CHECK(nestedCaught);
+    }
+
+    void testLifecycle()
+    {
+        ReflectionRegistry &registry = ReflectionRegistry::getInstance();
+
+        registry.registerClassName<RemovableObject>("RemovableObject");
+        registry.registerField<RemovableObject>("RemovableObject", "value",
+                                                &RemovableObject::value_);
+        registry.registerConstructor<RemovableObject>("RemovableObject");
+        CHECK(registry.hasClass("RemovableObject"));
+        CHECK(registry.unregisterClass("RemovableObject"));
+        CHECK(!registry.hasClass("RemovableObject"));
+        CHECK(!registry.hasField("RemovableObject", "value"));
+        CHECK_ERROR(ReflectionErrorCode::ClassNotFound,
+                    (registry.createInstance("RemovableObject")));
+        CHECK(!registry.unregisterClass("RemovableObject"));
+
+        registry.registerClassName<RemovableObject>("RemovableObject");
+        registry.registerField<RemovableObject>("RemovableObject", "value",
+                                                &RemovableObject::value_);
+        registry.registerConstructor<RemovableObject>("RemovableObject");
+        CHECK(registry.hasClass("RemovableObject"));
+        CHECK(registry.unregisterClass("RemovableObject"));
+
+        registry.registerClass<MultiAliasObject>("AliasA");
+        registry.registerClass<MultiAliasObject>("AliasB");
+        registry.registerField<MultiAliasObject>("AliasA", "value",
+                                                 &MultiAliasObject::value_);
+        registry.registerField<MultiAliasObject>("AliasB", "value",
+                                                 &MultiAliasObject::value_);
+        CHECK(registry.hasClass("AliasA"));
+        CHECK(registry.hasClass("AliasB"));
+        CHECK(registry.unregisterClass("AliasA"));
+        CHECK(!registry.hasClass("AliasA"));
+        CHECK(registry.hasClass("AliasB"));
+        CHECK(registry.hasField("AliasB", "value"));
+        CHECK(registry.unregisterClass("AliasB"));
+        CHECK(!registry.hasClass("AliasB"));
+    }
+
+    void testClear()
+    {
+        ReflectionRegistry &registry = ReflectionRegistry::getInstance();
+        registry.clear();
+        CHECK(registry.getClassNames().empty());
+        CHECK(!registry.hasClass("TestObject"));
+
+        registry.registerClassName<ClearedObject>("ClearedObject");
+        registry.registerField<ClearedObject>("ClearedObject", "value",
+                                              &ClearedObject::value_);
+        registry.registerConstructor<ClearedObject>("ClearedObject");
+        CHECK(registry.hasClass("ClearedObject"));
+        CHECK(registry.unregisterClass("ClearedObject"));
+    }
+
     void testRegistrationErrors()
     {
         ReflectionRegistry &registry = ReflectionRegistry::getInstance();
@@ -1106,8 +1233,11 @@ namespace
         {"Qualifiers", testQualifiers},
         {"Constructors", testConstructors},
         {"AutoRegistration", testAutoRegistration},
+        {"RegistrationBatch", testRegistrationBatch},
+        {"Lifecycle", testLifecycle},
         {"RegistrationErrors", testRegistrationErrors},
-        {"ThreadSafety", testThreadSafety}};
+        {"ThreadSafety", testThreadSafety},
+        {"Clear", testClear}};
 }
 
 int main(int argc, char **argv)

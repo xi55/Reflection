@@ -67,6 +67,14 @@ jobs:
         run: cmake --build build -j
       - name: Test
         run: ctest --test-dir build --output-on-failure
+      - name: Install
+        run: cmake --install build --prefix "${{ github.workspace }}/install"
+      - name: Consumer
+        run: |
+          cmake -S examples/consumer -B consumer-build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="${{ github.workspace }}/install"
+          cmake --build consumer-build -j
+          LD_LIBRARY_PATH="${{ github.workspace }}/install/lib:${{ github.workspace }}/install/lib64" ./consumer-build/evently_consumer
 
   shared-windows:
     runs-on: windows-latest
@@ -81,6 +89,14 @@ jobs:
         run: cmake --build build --config Release
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
+      - name: Install
+        run: cmake --install build --config Release --prefix "${{ github.workspace }}/install"
+      - name: Consumer
+        run: |
+          cmake -S examples/consumer -B consumer-build -DCMAKE_PREFIX_PATH="${{ github.workspace }}/install"
+          cmake --build consumer-build --config Release
+          $env:PATH = "${{ github.workspace }}\install\bin;$env:PATH"
+          .\consumer-build\Release\evently_consumer.exe
 
   docs:
     runs-on: ubuntu-latest

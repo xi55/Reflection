@@ -699,6 +699,8 @@ namespace Evently
         ClassInfo getClassInfo(const std::string &className) const;
 
         void registerAll();
+        bool unregisterClass(const std::string &className);
+        void clear();
         void freeze();
         bool isFrozen() const noexcept;
 
@@ -740,9 +742,28 @@ namespace Evently
                 factories;
         };
 
+        struct WriteContext
+        {
+            std::unique_lock<std::mutex> lock;
+            std::shared_ptr<RegistryData> data;
+            bool batched;
+
+            WriteContext() : batched(false) {}
+        };
+
+        friend class RegistrationBatch;
+
         std::shared_ptr<const RegistryData> snapshot() const;
         std::shared_ptr<RegistryData> copyData() const;
         void publish(const std::shared_ptr<RegistryData> &data);
+
+        WriteContext beginWrite();
+        void endWrite(WriteContext &context);
+
+        std::unique_lock<std::mutex> acquireBatchLock();
+        void startBatch();
+        void commitBatch();
+        void abortBatch();
 
         static void ensureClass(RegistryData &data,
                                 const std::string &className);
@@ -768,8 +789,26 @@ namespace Evently
                              const std::vector<Any> &args) const;
 
         std::shared_ptr<const RegistryData> data_;
+        std::shared_ptr<RegistryData> batchData_;
         std::mutex writeMutex_;
         std::atomic<bool> frozen_;
+    };
+
+    class EVENTLY_API RegistrationBatch
+    {
+    public:
+        explicit RegistrationBatch(ReflectionRegistry &registry);
+        ~RegistrationBatch();
+
+        void commit();
+
+    private:
+        RegistrationBatch(const RegistrationBatch &) = delete;
+        RegistrationBatch &operator=(const RegistrationBatch &) = delete;
+
+        ReflectionRegistry *registry_;
+        std::unique_lock<std::mutex> lock_;
+        bool committed_;
     };
 
     template <typename T>

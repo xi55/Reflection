@@ -33,6 +33,8 @@
 - ✅ `noexcept`、完整 ref-qualified（含 `&&`）、静态/自由函数
 - ✅ 运行期构造函数注册与参数匹配
 - ✅ `registerAll()` + `EVENTLY_REGISTER_CLASS` 自动注册队列
+- ✅ `RegistrationBatch` 批量 COW 事务
+- ✅ `unregisterClass` / `clear` 生命周期 API
 - ✅ 基于字段元数据的 JSON 序列化示例
 - ✅ `Any` 小对象内联存储、move、`has_value`/`reset`/`emplace`
 - ✅ const 实例只能调用 const 方法
@@ -58,6 +60,7 @@ Reflection/
 ├── tests/reflection_tests.cpp  # 断言式回归测试
 ├── examples/consumer/          # find_package 消费方示例
 ├── examples/json_serialization.cpp # 字段元数据 JSON 序列化示例
+├── benchmarks/reflection_benchmark.cpp # 注册/查询/调用/Any 基准
 ├── scripts/build-msvc.ps1      # Windows/MSVC + Windows SDK 构建脚本
 ├── cmake/EventlyConfig.cmake.in # CMake package 配置模板
 ├── docs/Doxyfile.in            # Doxygen 配置模板
@@ -84,12 +87,21 @@ Reflection/
 - ✅ 类型安全 `ObjectHandle`、统一错误码与元数据查询
 - ✅ 方法重载、const 实例调用、COW 并发读写
 - ✅ `noexcept`、完整 ref-qualified、静态/自由函数、运行期构造函数
-- ✅ 自动注册队列、JSON 序列化示例、`Any` 小对象优化
-- ✅ install/export、CI 与 250+ 项断言的回归测试
+- ✅ 自动注册队列、批量事务、生命周期 API、JSON 示例、`Any` 小对象优化
+- ✅ 基准测试、install/export、CI 与 250+ 项断言的回归测试
 
 ---
 
 ## 📅 更新日志
+
+### v4.1.0 - 批量 COW 与生命周期 (2026-10-22)
+
+- 新增 `RegistrationBatch`，`registerAll()` 只复制/发布一次 COW 快照
+- 批量注册失败回滚，`RegistrationQueue` 异常时恢复队列
+- 新增 `unregisterClass()` / `clear()`
+- 新增 `EVENTLY_BUILD_BENCHMARKS` 与 `ReflectionBenchmark`
+- 新增共享库/Doxygen 发布验证 CI
+- 扩展批量事务、生命周期和清理测试
 
 ### v4.0.0 - COW、共享库与文档 (2026-10-22)
 
@@ -219,8 +231,8 @@ Reflection/
 当前版本仍有以下边界：
 
 1. **COW 快照边界**：
-   - 每次注册都会复制注册表快照，频繁写入时有内存/复制开销
-   - 暂无 unregister/clear；动态卸载插件需要额外的生命周期管理
+   - 单条注册仍会复制注册表快照；批量注册通过 `RegistrationBatch` 摊薄成本
+   - 已提供 `unregisterClass` / `clear`，但插件 DLL 卸载后的代码生命周期仍需调用方保证
    - `getSetter` 返回 `shared_ptr`，调用方可以安全持有
 
 2. **方法/构造解析使用精确类型匹配**：
@@ -240,10 +252,11 @@ Reflection/
 
 ## 🚀 后续方向
 
-### 🎯 v4.1.0 - 生命周期与运维
-- [ ] unregister/clear 与插件卸载
-- [ ] COW 快照的增量/分片优化，降低频繁写入成本
+### 🎯 v4.2.0 - 性能、ABI 与运维
+- [ ] COW 按类分片，降低大注册表单次写入成本
+- [ ] Pimpl/ABI 稳定与共享库跨版本兼容
 - [ ] 共享库安装包消费方自动化测试
+- [ ] 插件热加载/卸载生命周期策略
 - [ ] 性能基准与文档持续完善
 
 ---
@@ -255,7 +268,7 @@ Reflection/
 - **Linux/GCC**：支持 C++11 和 C++17
 - **Windows/MSVC**：Visual Studio 2019 + Windows SDK
 - MSVC 没有 `/std:c++11`，使用默认或 `/std:c++14` 作为 C++11 基线；C++17 使用 `/std:c++17`
-- `EVENTLY_BUILD_EXAMPLES=OFF` 可关闭 `JsonSerializationExample`；测试由 `BUILD_TESTING` 控制
+- `EVENTLY_BUILD_EXAMPLES=OFF` 可关闭 `JsonSerializationExample`；`EVENTLY_BUILD_BENCHMARKS=ON` 构建 `ReflectionBenchmark`；测试由 `BUILD_TESTING` 控制
 
 ### Linux/GCC
 
@@ -345,7 +358,7 @@ ctest --test-dir build\msvc-cxx14 -R reflection_ --output-on-failure
 
 Linux 下对应运行 `build/gcc-cxx11/ReflectionTests --test Any`。
 
-测试组：`Any`、`Fields`、`Methods`、`Factory`、`Metadata`、`Functions`、`Qualifiers`、`Constructors`、`AutoRegistration`、`RegistrationErrors`、`ThreadSafety`，共 250+ 项断言（C++17 额外包含 `noexcept` 用例）。CTest 将核心测试和会执行并发读写的 `ThreadSafety` 分开进程运行，并运行 `JsonSerializationExample`。
+测试组：`Any`、`Fields`、`Methods`、`Factory`、`Metadata`、`Functions`、`Qualifiers`、`Constructors`、`AutoRegistration`、`RegistrationBatch`、`Lifecycle`、`RegistrationErrors`、`ThreadSafety`、`Clear`，共 250+ 项断言（C++17 额外包含 `noexcept` 用例）。CTest 将核心测试和会执行并发读写的 `ThreadSafety` 分开进程运行，并运行 `JsonSerializationExample`。
 
 ---
 
@@ -448,6 +461,25 @@ int main() {
 ```
 
 宏应放在 `.cpp` 中；注册函数先进入队列，`registerAll()` 由用户显式执行，避免静态初始化阶段抛异常。JSON 序列化示例见 `examples/json_serialization.cpp`。
+
+批量注册：
+
+```cpp
+{
+    Evently::RegistrationBatch batch(registry);
+    registry.registerClass<Person>("Person");
+    registry.registerField<Person>("Person", "name", &Person::name);
+    registry.registerField<Person>("Person", "age", &Person::age);
+    batch.commit();
+}
+```
+
+生命周期：
+
+```cpp
+registry.unregisterClass("Person");
+registry.clear();
+```
 
 对 `&&` / `const &&` 成员函数使用 `RvalueInstance`：
 
