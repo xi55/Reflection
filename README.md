@@ -10,11 +10,12 @@
 
 ## 📦 项目简介
 
-该反射系统最初使用了 **C++17/20** 的新特性，现已降级兼容至 **C++11**，包括：
-- 自定义 `Any` 类：实现类型擦除，统一存储任意字段和方法参数
-- `std::unique_ptr`：智能内存管理
-- 可变参数模板 + 自定义 `index_sequence`：实现泛型的成员方法调用器
-- 类注册、字段注册、方法注册、对象工厂抽象接口设计
+该反射系统最初使用了 **C++17/20** 的新特性，现已兼容 **C++11 与 C++17**，包括：
+- 自定义 `Any` 类：类型擦除，统一存储字段和方法参数
+- `ObjectHandle`：基于 `std::shared_ptr` 的类型安全对象句柄
+- 可变参数模板 + 自定义 `index_sequence`：泛型成员方法调用器
+- 类、字段、方法、对象工厂注册，以及字段/方法元数据
+- 初始化后冻结的线程安全模型：冻结后可并发只读访问
 
 > 类似于 Java/C# 中的反射系统，是构建脚本系统、插件系统、序列化框架、可视化编辑器等的基础组件。
 
@@ -25,12 +26,14 @@
 - ✅ 类名注册（自定义类名）
 - ✅ 字段注册和字段值访问（支持任意类型）
 - ✅ 方法注册与动态调用（支持参数传递和返回值）
-- ✅ 动态创建对象（默认构造 & 带参构造）
-- ✅ 方法调用参数校验与异常处理
-- ✅ 查询类的全部方法名
-- ✅ 获取类的所有字段值
-- ✅ void 返回类型方法的正确处理
-- ✅ 引用参数的安全处理
+- ✅ 动态创建对象（默认构造 & 带参构造），返回类型安全 `ObjectHandle`
+- ✅ 统一 `ReflectionError` 错误码与 `hasClass` / `hasField` / `hasMethod` 查询
+- ✅ 字段与方法元数据（字段类型、可写性、参数类型、返回类型、const 标记）
+- ✅ 方法重载解析（按参数数量和精确类型匹配）
+- ✅ const 实例只能调用 const 方法
+- ✅ 初始化后 `freeze()`，之后可并发只读访问
+- ✅ CMake install/export，支持 `find_package(Evently CONFIG REQUIRED)`
+- ✅ C++11/C++17、GCC/MSVC、CTest 与 CI
 
 ---
 
@@ -40,13 +43,18 @@
 Reflection/
 ├── Any.h                 # 自定义 Any 类型实现（替代 std::any）
 ├── IndexSequence.h       # C++11 兼容的 index_sequence 实现
+├── ObjectHandle.h        # 类型安全对象句柄
+├── ReflectionError.h     # 统一错误码与 ReflectionError
 ├── Reflection.h          # 反射系统核心类与接口定义
-├── Reflection.cpp        # 接口实现，包括哈希函数、注册中心逻辑等
-├── main.cpp             # 使用示例/演示程序
+├── Reflection.cpp        # 注册中心、哈希与查询实现
+├── main.cpp              # 使用示例/演示程序
 ├── tests/reflection_tests.cpp  # 断言式回归测试
+├── examples/consumer/          # find_package 消费方示例
 ├── scripts/build-msvc.ps1      # Windows/MSVC + Windows SDK 构建脚本
-├── CMakeLists.txt       # CMake 构建配置
-└── README.md            # 项目文档
+├── cmake/EventlyConfig.cmake.in # CMake package 配置模板
+├── .github/workflows/ci.yml    # Linux/Windows/消毒器 CI
+├── CMakeLists.txt        # CMake 构建与安装配置
+└── README.md             # 项目文档
 ```
 
 ---
@@ -63,13 +71,26 @@ Reflection/
 - ✅ Linux/GCC 与 Windows/MSVC 构建
 - ✅ 自定义 Any 类型擦除系统，修正 cv/引用转换
 - ✅ void 返回类型方法的正确处理
-- ✅ 断言式回归测试与 CTest 集成
-
-代码结构清晰，易于扩展，已初步具备实际应用能力。
+- ✅ 类型安全 `ObjectHandle`、统一错误码与元数据查询
+- ✅ 方法重载、const 实例调用、冻结后并发只读
+- ✅ install/export、CI 与 190 项断言的回归测试
 
 ---
 
 ## 📅 更新日志
+
+### v3.0.0 - 生产级核心 (2026-10-22)
+
+#### 🎯 主要更新
+- 新增 `ObjectHandle`，替代 `unique_ptr<void, deleter>` 作为对象所有权句柄
+- 新增 `ReflectionError` 错误码体系与 `hasClass` / `hasField` / `hasMethod` / `isFieldWritable`
+- 新增字段/方法元数据：`FieldInfo`、`MethodInfo`、`ClassInfo`
+- 支持同名方法重载，按参数数量和精确类型解析
+- 支持 const 实例调用 const 方法，非 const 方法拒绝 const 实例
+- 注册中心新增 `freeze()`：冻结后禁止注册，之后支持并发只读访问
+- 重复注册、缺失类/字段/方法、参数错误全部统一为 `ReflectionError`
+- CMake install/export，支持 `find_package(Evently CONFIG REQUIRED)`
+- 新增 GitHub Actions CI（GCC/Clang/MSVC、C++11/17、ASan/UBSan/TSan）
 
 ### v2.2.0 - C++11/C++17 双标准与 Windows/MSVC 支持 (2026-10-22)
 
@@ -149,50 +170,42 @@ Reflection/
 
 ## ⚠️ 存在的不足
 
-虽然系统功能完整，但目前仍存在以下问题：
+当前版本仍有以下边界：
 
-1. **对象所有权仍偏底层**：
-   - 使用 `std::unique_ptr<void, void(*)(void*)>` 管理对象内存，`void*` 不具备类型安全
-   - 创建出的对象需要调用方自行转换到具体类型
+1. **线程安全模型是“冻结后只读”**：
+   - 注册阶段需在启动时完成；`freeze()` 之后不允许再注册
+   - 需要运行期动态注册时，应改为 COW 快照模型或在外部加锁
 
-2. **缺乏线程安全保证**：
-   - `ReflectionRegistry` 尚未引入锁机制，不能保证多线程注册/调用安全
-   - 建议在启动阶段完成注册，之后只读使用
+2. **方法解析使用精确类型匹配**：
+   - 不进行隐式数值转换；`int` 参数必须传 `Any(int)`
+   - 暂不支持 `noexcept`、ref-qualified、静态/自由函数
 
-3. **错误处理仍不完全统一**：
-   - 大部分查询和调用通过异常报告错误
-   - 部分查询仍以空 `Any` 或 `nullptr` 表示“未找到”
+3. **便利层尚未完成**：
+   - 暂无自动注册宏
+   - 暂无内置序列化/JSON 支持
+   - `Any` 仍以堆分配为主，未做小对象优化
+
+4. **Windows 默认静态 CRT**：
+   - 集成到 `/MD` 项目时需要统一 `CMAKE_MSVC_RUNTIME_LIBRARY`
 
 ---
 
-## 🚀 未来更新方向
+## 🚀 后续方向
 
-计划中的更新包括：
+### 🎯 v3.1.0 - 调用能力扩展
+- [ ] 支持 `noexcept`、ref-qualified 成员函数
+- [ ] 支持静态函数/自由函数注册
+- [ ] 可选的隐式数值转换策略
 
-### 🎯 v2.1.0 - const 方法支持
-- [x] 实现 `ConstMethodInvoker` 类
-- [x] 支持 const 成员方法的注册和调用
-- [x] 更新测试用例 / 示例
+### 🎯 v3.2.0 - 便利层
+- [ ] 自动注册宏（显式 `registerAll()` 优先）
+- [ ] 基于字段元数据的 JSON 序列化示例
+- [ ] `Any` 小对象优化与 move 优化
 
-### 🎯 v2.3.0 - 错误处理优化
-- [ ] 改用 `std::optional` 风格接口返回调用结果
-- [ ] 统一“未找到”与“类型错误”的返回/异常策略
-
-### 🎯 v2.4.0 - 工厂接口重构
-- [ ] 使用 `std::shared_ptr<void>` 替代 `unique_ptr<void, void(*)(void*)>`
-- [ ] 引入模板化工厂，简化对象生命周期管理
-- [ ] 提升类型安全性
-
-### 🎯 v3.0.0 - 高级特性
-- [ ] 使用 `std::mutex` 提供线程安全版本
-- [ ] 支持方法重载、`noexcept` 与 ref-qualified 成员函数
-- [ ] 提供自动注册宏简化用户使用：
-  ```cpp
-  REGISTER_CLASS(MyClass)
-  REGISTER_METHOD(MyClass, foo)
-  REGISTER_FIELD(MyClass, bar)
-  ```
-- [ ] 增加 install/export 与 CI 构建矩阵
+### 🎯 v4.0.0 - 动态与分发
+- [ ] COW 快照，支持冻结后动态注册
+- [ ] 共享库导出宏与 `BUILD_SHARED_LIBS`
+- [ ] Doxygen API 文档与更多平台 CI
 
 ---
 
@@ -236,6 +249,25 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-msvc.ps1 `
 
 CMake 默认将 MSVC 运行时设置为静态（Debug 为 `/MTd`，Release 为 `/MT`），因此 `Test.exe` 和 `ReflectionTests.exe` 不依赖额外的 Debug CRT DLL。如果要把 `evently_reflection` 集成到使用 `/MD` 的项目，请把双方的 `CMAKE_MSVC_RUNTIME_LIBRARY` 设置为一致。
 
+### 安装与集成
+
+```bash
+cmake --install build/gcc-cxx11 --prefix install
+```
+
+消费方：
+
+```cmake
+find_package(Evently CONFIG REQUIRED)
+target_link_libraries(app PRIVATE Evently::Reflection)
+```
+
+```cpp
+#include <Evently/Reflection.h>
+```
+
+安装包会提供 `EventlyConfig.cmake`、`EventlyTargets.cmake` 和 `include/Evently/` 头文件。Windows 消费方需要与库使用相同的 MSVC 运行时（默认静态），并保持 Debug/Release 配置一致。仓库内的 `examples/consumer` 是完整的最小消费方示例。
+
 ### 手动编译
 
 ```bash
@@ -252,46 +284,61 @@ ctest --test-dir build\msvc-cxx14 -R reflection_tests --output-on-failure
 
 Linux 下对应运行 `build/gcc-cxx11/ReflectionTests --test Any`。
 
+测试组：`Any`、`Fields`、`Methods`、`Factory`、`Metadata`、`RegistrationErrors`、`ThreadSafety`，共 190 项断言。
+
 ---
 
 ## 📖 使用示例
 
 ```cpp
-#include "Reflection.h"
+#include <Evently/Reflection.h>
+
+#include <string>
+#include <vector>
 
 class Person {
 public:
     std::string name;
-    int age;
-    
+    int age = 0;
+
     void setName(const std::string& n) { name = n; }
     std::string getName() const { return name; }
 };
 
 int main() {
-    auto& registry = Evently::ReflectionRegistry::getInstance();
-    
-    // 注册类
+    Evently::ReflectionRegistry& registry =
+        Evently::ReflectionRegistry::getInstance();
+
     registry.registerClassName<Person>("Person");
-    registry.registerClass<Person>("Person");
-    
-    // 注册字段
     registry.registerField<Person>("Person", "name", &Person::name);
     registry.registerField<Person>("Person", "age", &Person::age);
-    
-    // 注册方法
     registry.registerMethod<Person, void, const std::string&>(
         "Person", "setName", &Person::setName);
-    
-    // 创建对象
-    auto instance = registry.createInstance("Person");
-    Person* person = static_cast<Person*>(instance.get());
-    
-    // 调用方法
+    registry.registerMethod<Person, std::string>(
+        "Person", "getName", &Person::getName);
+    registry.registerClass<Person>("Person");
+
+    registry.freeze();
+
+    Evently::ObjectHandle instance = registry.createInstance("Person");
+    Person* person = instance.get<Person>();
+    if (person == nullptr) {
+        return 1;
+    }
+
     std::vector<Evently::Any> args = {Evently::Any(std::string("John"))};
     registry.invokeMethod("Person", "setName", person, args);
-    
-    return 0;
+    Evently::Any name = registry.invokeMethod("Person", "getName", person, {});
+
+    try {
+        Evently::PropertySetterBase* setter =
+            registry.getSetter("Person", "age");
+        setter->set(person, Evently::Any(30));
+    } catch (const Evently::ReflectionError& error) {
+        return static_cast<int>(error.code()) + 2;
+    }
+
+    return Evently::any_cast<std::string>(name) == "John" ? 0 : 1;
 }
 ```
 

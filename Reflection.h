@@ -4,79 +4,110 @@
 
 #include "Any.h"
 #include "IndexSequence.h"
+#include "ObjectHandle.h"
+#include "ReflectionError.h"
+
+#include <atomic>
 #include <cstddef>
-#include <string>
-#include <unordered_map>
 #include <memory>
+#include <mutex>
 #include <set>
-#include <vector>
 #include <stdexcept>
+#include <string>
 #include <tuple>
 #include <type_traits>
 #include <typeindex>
+#include <unordered_map>
 #include <utility>
+#include <vector>
 
 namespace Evently
 {
-
-    /**
-     * @brief 属性设置器基类
-     */
     class PropertySetterBase
     {
     public:
-        virtual ~PropertySetterBase() = default;
+        virtual ~PropertySetterBase() {}
         virtual void set(void *instance, const Any &value) = 0;
         virtual Any get(const void *instance) const = 0;
+        virtual std::type_index type() const = 0;
+        virtual bool isWritable() const = 0;
     };
 
-    /**
-     * @brief 方法调用器基类
-     */
     class MethodInvokerBase
     {
     public:
-        virtual ~MethodInvokerBase() = default;
-        virtual Any invoke(void *instance, const std::vector<Any> &args) const = 0;
+        virtual ~MethodInvokerBase() {}
+        virtual Any invoke(const void *instance, const std::vector<Any> &args) const = 0;
+        virtual std::size_t arity() const = 0;
+        virtual std::vector<std::type_index> parameterTypes() const = 0;
+        virtual std::type_index returnType() const = 0;
+        virtual bool isConst() const = 0;
     };
 
-    /**
-     * @brief 对象工厂基类
-     */
     class ObjectFactory
     {
     public:
-        virtual ~ObjectFactory() = default;
-        virtual std::unique_ptr<void, void (*)(void *)> create() = 0;
+        virtual ~ObjectFactory() {}
+        virtual ObjectHandle create() = 0;
     };
 
-    /**
-     * @brief 字符串对哈希函数
-     */
     struct PairHash
     {
         std::size_t operator()(const std::pair<std::string, std::string> &pair) const;
     };
 
-    /**
-     * @brief 字符串对相等比较函数
-     */
     struct PairEqual
     {
         bool operator()(const std::pair<std::string, std::string> &lhs,
                         const std::pair<std::string, std::string> &rhs) const;
     };
 
-    /**
-     * @brief 成员变量属性设置器模板类
-     */
+    struct FieldInfo
+    {
+        FieldInfo(const std::string &fieldName, const std::type_index &fieldType,
+                  bool fieldWritable)
+            : name(fieldName), type(fieldType), writable(fieldWritable) {}
+
+        std::string name;
+        std::type_index type;
+        bool writable;
+    };
+
+    struct MethodInfo
+    {
+        MethodInfo(const std::string &methodName, std::size_t methodArity,
+                   const std::vector<std::type_index> &parameters,
+                   const std::type_index &resultType, bool constMethod)
+            : name(methodName), arity(methodArity),
+              parameterTypes(parameters), returnType(resultType),
+              isConst(constMethod) {}
+
+        std::string name;
+        std::size_t arity;
+        std::vector<std::type_index> parameterTypes;
+        std::type_index returnType;
+        bool isConst;
+    };
+
+    struct ClassInfo
+    {
+        explicit ClassInfo(const std::string &className)
+            : name(className) {}
+
+        std::string name;
+        std::vector<FieldInfo> fields;
+        std::vector<MethodInfo> methods;
+    };
+
     template <typename T, typename FieldType>
     class PropertySetter : public PropertySetterBase
     {
     public:
-        PropertySetter(FieldType T::*field);
+        explicit PropertySetter(FieldType T::*field);
         void set(void *instance, const Any &value) override;
         Any get(const void *instance) const override;
+        std::type_index type() const override;
+        bool isWritable() const override;
 
     private:
         FieldType T::*field_;
@@ -85,17 +116,18 @@ namespace Evently
         void setImpl(void *instance, const Any &value, std::false_type);
     };
 
-    /**
-     * @brief 成员函数调用器模板类（非void返回类型）
-     */
     template <typename T, typename ReturnType, typename... Args>
     class MethodInvoker : public MethodInvokerBase
     {
     public:
         using MethodType = ReturnType (T::*)(Args...);
 
-        MethodInvoker(MethodType method);
-        Any invoke(void *instance, const std::vector<Any> &args) const override;
+        explicit MethodInvoker(MethodType method);
+        Any invoke(const void *instance, const std::vector<Any> &args) const override;
+        std::size_t arity() const override;
+        std::vector<std::type_index> parameterTypes() const override;
+        std::type_index returnType() const override;
+        bool isConst() const override;
 
     private:
         MethodType method_;
@@ -105,37 +137,39 @@ namespace Evently
                        index_sequence<Indexes...>) const;
     };
 
-    /**
-     * @brief void返回类型的方法调用器特化
-     */
     template <typename T, typename... Args>
     class MethodInvoker<T, void, Args...> : public MethodInvokerBase
     {
     public:
         using MethodType = void (T::*)(Args...);
 
-        MethodInvoker(MethodType method);
-        Any invoke(void *instance, const std::vector<Any> &args) const override;
+        explicit MethodInvoker(MethodType method);
+        Any invoke(const void *instance, const std::vector<Any> &args) const override;
+        std::size_t arity() const override;
+        std::vector<std::type_index> parameterTypes() const override;
+        std::type_index returnType() const override;
+        bool isConst() const override;
 
     private:
         MethodType method_;
 
-    template <std::size_t... Indexes>
-    Any invokeImpl(T *obj, const std::vector<Any> &args,
-               index_sequence<Indexes...>) const;
+        template <std::size_t... Indexes>
+        Any invokeImpl(T *obj, const std::vector<Any> &args,
+                       index_sequence<Indexes...>) const;
     };
 
-    /**
-     * @brief const成员函数调用器模板类
-     */
     template <typename T, typename ReturnType, typename... Args>
     class ConstMethodInvoker : public MethodInvokerBase
     {
     public:
         using MethodType = ReturnType (T::*)(Args...) const;
 
-        ConstMethodInvoker(MethodType method);
-        Any invoke(void *instance, const std::vector<Any> &args) const override;
+        explicit ConstMethodInvoker(MethodType method);
+        Any invoke(const void *instance, const std::vector<Any> &args) const override;
+        std::size_t arity() const override;
+        std::vector<std::type_index> parameterTypes() const override;
+        std::type_index returnType() const override;
+        bool isConst() const override;
 
     private:
         MethodType method_;
@@ -149,46 +183,33 @@ namespace Evently
                        index_sequence<Indexes...>, std::true_type) const;
     };
 
-    /**
-     * @brief 默认构造对象工厂实现
-     */
     template <typename T>
     class ObjectFactoryImpl : public ObjectFactory
     {
     public:
-        std::unique_ptr<void, void (*)(void *)> create() override
+        ObjectHandle create() override
         {
-            return std::unique_ptr<void, void (*)(void *)>(
-                new T(),
-                [](void *p)
-                { delete static_cast<T *>(p); });
+            return ObjectHandle::create<T>();
         }
     };
 
-    /**
-     * @brief 带参数构造对象工厂实现
-     */
     template <typename T, typename... Args>
     class ObjectFactoryWithParamImpl : public ObjectFactory
     {
     public:
-        ObjectFactoryWithParamImpl(Args... args)
+        explicit ObjectFactoryWithParamImpl(Args... args)
             : args_(std::make_tuple(std::forward<Args>(args)...)) {}
 
-        std::unique_ptr<void, void (*)(void *)> create() override
+        ObjectHandle create() override
         {
             return createImpl(typename index_sequence_for<Args...>::type{});
         }
 
     private:
         template <std::size_t... Is>
-        std::unique_ptr<void, void (*)(void *)> createImpl(index_sequence<Is...>)
+        ObjectHandle createImpl(index_sequence<Is...>)
         {
-            T *ptr = new T(std::get<Is>(args_)...);
-            return std::unique_ptr<void, void (*)(void *)>(
-                ptr,
-                [](void *p)
-                { delete static_cast<T *>(p); });
+            return ObjectHandle::create<T>(std::get<Is>(args_)...);
         }
 
         std::tuple<Args...> args_;
@@ -206,9 +227,6 @@ namespace Evently
         typedef ObjectFactoryImpl<T> type;
     };
 
-    /**
-     * @brief 反射注册表类（单例模式）
-     */
     class ReflectionRegistry
     {
     public:
@@ -241,29 +259,26 @@ namespace Evently
         {
             static_assert(sizeof...(Args) != 0 || std::is_default_constructible<T>::value,
                           "default-constructed registration requires a default constructor");
-            if (className.empty())
-            {
-                throw std::invalid_argument("类名不能为空");
-            }
-            factories_[className] = std::unique_ptr<ObjectFactory>(
-                new typename ObjectFactorySelector<
-                    T, typename std::decay<Args>::type...>::type(
-                    std::forward<Args>(args)...));
+            addFactory(className,
+                       std::unique_ptr<ObjectFactory>(
+                           new typename ObjectFactorySelector<
+                               T, typename std::decay<Args>::type...>::type(
+                               std::forward<Args>(args)...)));
         }
 
-        template <typename... Args>
-        std::unique_ptr<void, void (*)(void *)> createInstance(const std::string &className) const
-        {
-            auto it = factories_.find(className);
-            if (it != factories_.end())
-            {
-                return it->second->create();
-            }
-            return {nullptr, [](void *) {}};
-        }
+        ObjectHandle createInstance(const std::string &className) const;
 
         template <typename T>
         std::string getClassName() const;
+
+        template <typename T>
+        bool hasClassName() const;
+
+        bool hasClass(const std::string &className) const;
+        bool hasField(const std::string &className, const std::string &fieldName) const;
+        bool hasMethod(const std::string &className, const std::string &methodName) const;
+        bool isFieldWritable(const std::string &className,
+                             const std::string &fieldName) const;
 
         PropertySetterBase *getSetter(const std::string &className,
                                       const std::string &fieldName) const;
@@ -277,12 +292,46 @@ namespace Evently
         Any invokeMethod(const std::string &className, const std::string &methodName,
                          void *instance, const std::vector<Any> &args) const;
 
+        Any invokeMethod(const std::string &className, const std::string &methodName,
+                         const void *instance, const std::vector<Any> &args) const;
+
+        Any invokeMethod(const std::string &className, const std::string &methodName,
+                         std::nullptr_t instance, const std::vector<Any> &args) const;
+
         std::set<std::string> getMethodNames(const std::string &className) const;
+
+        std::vector<FieldInfo> getFields(const std::string &className) const;
+        std::vector<MethodInfo> getMethods(const std::string &className) const;
+        std::vector<std::string> getClassNames() const;
+        ClassInfo getClassInfo(const std::string &className) const;
+
+        void freeze();
+        bool isFrozen() const noexcept;
 
     private:
         ReflectionRegistry();
         ReflectionRegistry(const ReflectionRegistry &) = delete;
         ReflectionRegistry &operator=(const ReflectionRegistry &) = delete;
+
+        std::unique_lock<std::mutex> readLock() const;
+        void ensureMutableLocked() const;
+        void ensureClassLocked(const std::string &className);
+
+        void addClassName(const std::type_index &type, const std::string &className);
+        void addField(const std::string &className, const std::string &fieldName,
+                      std::unique_ptr<PropertySetterBase> setter);
+        void addMethod(const std::string &className, const std::string &methodName,
+                       std::unique_ptr<MethodInvokerBase> invoker);
+        void addFactory(const std::string &className,
+                        std::unique_ptr<ObjectFactory> factory);
+
+        Any invokeMethodImpl(const std::string &className,
+                             const std::string &methodName,
+                             const void *instance, bool instanceIsConst,
+                             const std::vector<Any> &args) const;
+
+        mutable std::mutex mutex_;
+        std::atomic<bool> frozen_;
 
         std::unordered_map<std::pair<std::string, std::string>,
                            std::unique_ptr<PropertySetterBase>,
@@ -290,21 +339,16 @@ namespace Evently
             setters_;
 
         std::unordered_map<std::pair<std::string, std::string>,
-                           std::unique_ptr<MethodInvokerBase>,
+                           std::vector<std::unique_ptr<MethodInvokerBase>>,
                            PairHash, PairEqual>
             methods_;
 
-        // 标记字段是否可写（const 字段不可写，但仍可通过 get 读取）
-        std::unordered_map<std::pair<std::string, std::string>, bool, PairHash, PairEqual>
-            setterWritable_;
-
         std::unordered_map<std::string, std::set<std::string>> methodNames_;
         std::unordered_map<std::type_index, std::string> classNames_;
+        std::set<std::string> classNamesSet_;
         std::unordered_map<std::string, std::unique_ptr<ObjectFactory>> factories_;
     };
 
-    // ReflectionRegistry 模板方法实现
-    // 参数获取辅助函数 - 处理引用类型
     template <typename ParamType>
     static ParamType getParam(const Any &arg)
     {
@@ -316,20 +360,25 @@ namespace Evently
         return any_cast<ParamType>(arg);
     }
 
-    // 非void返回类型的实现
     template <typename T, typename ReturnType, typename... Args>
     inline MethodInvoker<T, ReturnType, Args...>::MethodInvoker(MethodType method)
         : method_(method) {}
 
     template <typename T, typename ReturnType, typename... Args>
-    Any MethodInvoker<T, ReturnType, Args...>::invoke(void *instance,
-                                                      const std::vector<Any> &args) const
+    Any MethodInvoker<T, ReturnType, Args...>::invoke(
+        const void *instance, const std::vector<Any> &args) const
     {
+        if (instance == nullptr)
+        {
+            throw ReflectionError(ReflectionErrorCode::InvalidInstance,
+                                  "实例指针不能为空");
+        }
         if (args.size() != sizeof...(Args))
         {
-            throw std::invalid_argument("参数数量不匹配");
+            throw ReflectionError(ReflectionErrorCode::ArgumentCountMismatch,
+                                  "参数数量不匹配");
         }
-        T *obj = static_cast<T *>(instance);
+        T *obj = const_cast<T *>(static_cast<const T *>(instance));
         return invokeImpl(obj, args, typename index_sequence_for<Args...>::type{});
     }
 
@@ -341,20 +390,49 @@ namespace Evently
         return Any((obj->*method_)(getParam<Args>(args[Indexes])...));
     }
 
-    // void返回类型的特化实现
+    template <typename T, typename ReturnType, typename... Args>
+    std::size_t MethodInvoker<T, ReturnType, Args...>::arity() const
+    {
+        return sizeof...(Args);
+    }
+
+    template <typename T, typename ReturnType, typename... Args>
+    std::vector<std::type_index> MethodInvoker<T, ReturnType, Args...>::parameterTypes() const
+    {
+        return std::vector<std::type_index>{std::type_index(typeid(Args))...};
+    }
+
+    template <typename T, typename ReturnType, typename... Args>
+    std::type_index MethodInvoker<T, ReturnType, Args...>::returnType() const
+    {
+        return std::type_index(typeid(ReturnType));
+    }
+
+    template <typename T, typename ReturnType, typename... Args>
+    bool MethodInvoker<T, ReturnType, Args...>::isConst() const
+    {
+        return false;
+    }
+
     template <typename T, typename... Args>
     inline MethodInvoker<T, void, Args...>::MethodInvoker(MethodType method)
         : method_(method) {}
 
     template <typename T, typename... Args>
-    Any MethodInvoker<T, void, Args...>::invoke(void *instance,
-                                                const std::vector<Any> &args) const
+    Any MethodInvoker<T, void, Args...>::invoke(
+        const void *instance, const std::vector<Any> &args) const
     {
+        if (instance == nullptr)
+        {
+            throw ReflectionError(ReflectionErrorCode::InvalidInstance,
+                                  "实例指针不能为空");
+        }
         if (args.size() != sizeof...(Args))
         {
-            throw std::invalid_argument("参数数量不匹配");
+            throw ReflectionError(ReflectionErrorCode::ArgumentCountMismatch,
+                                  "参数数量不匹配");
         }
-        T *obj = static_cast<T *>(instance);
+        T *obj = const_cast<T *>(static_cast<const T *>(instance));
         return invokeImpl(obj, args, typename index_sequence_for<Args...>::type{});
     }
 
@@ -365,6 +443,53 @@ namespace Evently
     {
         (obj->*method_)(getParam<Args>(args[Indexes])...);
         return Any();
+    }
+
+    template <typename T, typename... Args>
+    std::size_t MethodInvoker<T, void, Args...>::arity() const
+    {
+        return sizeof...(Args);
+    }
+
+    template <typename T, typename... Args>
+    std::vector<std::type_index> MethodInvoker<T, void, Args...>::parameterTypes() const
+    {
+        return std::vector<std::type_index>{std::type_index(typeid(Args))...};
+    }
+
+    template <typename T, typename... Args>
+    std::type_index MethodInvoker<T, void, Args...>::returnType() const
+    {
+        return std::type_index(typeid(void));
+    }
+
+    template <typename T, typename... Args>
+    bool MethodInvoker<T, void, Args...>::isConst() const
+    {
+        return false;
+    }
+
+    template <typename T, typename ReturnType, typename... Args>
+    inline ConstMethodInvoker<T, ReturnType, Args...>::ConstMethodInvoker(MethodType method)
+        : method_(method) {}
+
+    template <typename T, typename ReturnType, typename... Args>
+    Any ConstMethodInvoker<T, ReturnType, Args...>::invoke(
+        const void *instance, const std::vector<Any> &args) const
+    {
+        if (instance == nullptr)
+        {
+            throw ReflectionError(ReflectionErrorCode::InvalidInstance,
+                                  "实例指针不能为空");
+        }
+        if (args.size() != sizeof...(Args))
+        {
+            throw ReflectionError(ReflectionErrorCode::ArgumentCountMismatch,
+                                  "参数数量不匹配");
+        }
+        const T *obj = static_cast<const T *>(instance);
+        return invokeImpl(obj, args, typename index_sequence_for<Args...>::type{},
+                          std::integral_constant<bool, std::is_void<ReturnType>::value>{});
     }
 
     template <typename T, typename ReturnType, typename... Args>
@@ -386,9 +511,33 @@ namespace Evently
         return Any();
     }
 
-    // PropertySetter 实现
+    template <typename T, typename ReturnType, typename... Args>
+    std::size_t ConstMethodInvoker<T, ReturnType, Args...>::arity() const
+    {
+        return sizeof...(Args);
+    }
+
+    template <typename T, typename ReturnType, typename... Args>
+    std::vector<std::type_index> ConstMethodInvoker<T, ReturnType, Args...>::parameterTypes() const
+    {
+        return std::vector<std::type_index>{std::type_index(typeid(Args))...};
+    }
+
+    template <typename T, typename ReturnType, typename... Args>
+    std::type_index ConstMethodInvoker<T, ReturnType, Args...>::returnType() const
+    {
+        return std::type_index(typeid(ReturnType));
+    }
+
+    template <typename T, typename ReturnType, typename... Args>
+    bool ConstMethodInvoker<T, ReturnType, Args...>::isConst() const
+    {
+        return true;
+    }
+
     template <typename T, typename FieldType>
-    PropertySetter<T, FieldType>::PropertySetter(FieldType T::*field) : field_(field) {}
+    PropertySetter<T, FieldType>::PropertySetter(FieldType T::*field)
+        : field_(field) {}
 
     template <typename T, typename FieldType>
     void PropertySetter<T, FieldType>::set(void *instance, const Any &value)
@@ -400,7 +549,8 @@ namespace Evently
     template <typename T, typename FieldType>
     void PropertySetter<T, FieldType>::setImpl(void *, const Any &, std::true_type)
     {
-        throw std::invalid_argument("PropertySetter: Cannot set value of const field");
+        throw ReflectionError(ReflectionErrorCode::FieldNotWritable,
+                              "const 字段不可写");
     }
 
     template <typename T, typename FieldType>
@@ -409,7 +559,8 @@ namespace Evently
     {
         if (instance == nullptr)
         {
-            throw std::invalid_argument("实例指针不能为空");
+            throw ReflectionError(ReflectionErrorCode::InvalidInstance,
+                                  "实例指针不能为空");
         }
         T *obj = static_cast<T *>(instance);
         try
@@ -418,7 +569,8 @@ namespace Evently
         }
         catch (const bad_any_cast &)
         {
-            throw std::invalid_argument("PropertySetter: Invalid type for field");
+            throw ReflectionError(ReflectionErrorCode::FieldTypeMismatch,
+                                  "字段类型不匹配");
         }
     }
 
@@ -427,28 +579,49 @@ namespace Evently
     {
         if (instance == nullptr)
         {
-            throw std::invalid_argument("实例指针不能为空");
+            throw ReflectionError(ReflectionErrorCode::InvalidInstance,
+                                  "实例指针不能为空");
         }
         const T *obj = static_cast<const T *>(instance);
         return Any(obj->*field_);
     }
 
-    // ReflectionRegistry 模板方法实现
+    template <typename T, typename FieldType>
+    std::type_index PropertySetter<T, FieldType>::type() const
+    {
+        return std::type_index(typeid(typename std::remove_cv<FieldType>::type));
+    }
+
+    template <typename T, typename FieldType>
+    bool PropertySetter<T, FieldType>::isWritable() const
+    {
+        return !std::is_const<FieldType>::value;
+    }
+
     template <typename T>
     void ReflectionRegistry::registerClassName(const std::string &className)
     {
-        if (className.empty())
-        {
-            throw std::invalid_argument("类名不能为空");
-        }
-        classNames_[std::type_index(typeid(T))] = className;
+        addClassName(std::type_index(typeid(T)), className);
     }
 
     template <typename T>
     std::string ReflectionRegistry::getClassName() const
     {
+        std::unique_lock<std::mutex> lock = readLock();
         auto it = classNames_.find(std::type_index(typeid(T)));
-        return it != classNames_.end() ? it->second : "unregistered";
+        if (it == classNames_.end())
+        {
+            throw ReflectionError(ReflectionErrorCode::ClassNotFound,
+                                  "类未注册");
+        }
+        return it->second;
+    }
+
+    template <typename T>
+    bool ReflectionRegistry::hasClassName() const
+    {
+        std::unique_lock<std::mutex> lock = readLock();
+        return classNames_.find(std::type_index(typeid(T))) != classNames_.end();
     }
 
     template <typename T, typename ReturnType, typename... Args>
@@ -456,15 +629,9 @@ namespace Evently
                                             const std::string &methodName,
                                             ReturnType (T::*method)(Args...))
     {
-        if (className.empty() || methodName.empty())
-        {
-            throw std::invalid_argument("类名和方法名不能为空");
-        }
-        auto key = std::make_pair(className, methodName);
-
-        methods_[key] = std::unique_ptr<MethodInvokerBase>(
-            new MethodInvoker<T, ReturnType, Args...>(method));
-        methodNames_[className].insert(methodName);
+        addMethod(className, methodName,
+                  std::unique_ptr<MethodInvokerBase>(
+                      new MethodInvoker<T, ReturnType, Args...>(method)));
     }
 
     template <typename T, typename ReturnType>
@@ -472,14 +639,9 @@ namespace Evently
                                             const std::string &methodName,
                                             ReturnType (T::*method)())
     {
-        if (className.empty() || methodName.empty())
-        {
-            throw std::invalid_argument("类名和方法名不能为空");
-        }
-        auto key = std::make_pair(className, methodName);
-        methods_[key] = std::unique_ptr<MethodInvokerBase>(
-            new MethodInvoker<T, ReturnType>(method));
-        methodNames_[className].insert(methodName);
+        addMethod(className, methodName,
+                  std::unique_ptr<MethodInvokerBase>(
+                      new MethodInvoker<T, ReturnType>(method)));
     }
 
     template <typename T, typename ReturnType, typename... Args>
@@ -487,14 +649,9 @@ namespace Evently
                                             const std::string &methodName,
                                             ReturnType (T::*method)(Args...) const)
     {
-        if (className.empty() || methodName.empty())
-        {
-            throw std::invalid_argument("类名和方法名不能为空");
-        }
-        auto key = std::make_pair(className, methodName);
-        methods_[key] = std::unique_ptr<MethodInvokerBase>(
-            new ConstMethodInvoker<T, ReturnType, Args...>(method));
-        methodNames_[className].insert(methodName);
+        addMethod(className, methodName,
+                  std::unique_ptr<MethodInvokerBase>(
+                      new ConstMethodInvoker<T, ReturnType, Args...>(method)));
     }
 
     template <typename T, typename FieldType>
@@ -502,47 +659,29 @@ namespace Evently
                                            const std::string &fieldName,
                                            FieldType T::*field)
     {
-        if (className.empty() || fieldName.empty())
-        {
-            throw std::invalid_argument("类名和字段名不能为空");
-        }
-        auto key = std::make_pair(className, fieldName);
-        setterWritable_[key] = !std::is_const<FieldType>::value;
-        setters_[key] = std::unique_ptr<PropertySetterBase>(
-            new PropertySetter<T, FieldType>(field));
+        addField(className, fieldName,
+                 std::unique_ptr<PropertySetterBase>(
+                     new PropertySetter<T, FieldType>(field)));
     }
 
     template <typename T, typename FieldType>
     void ReflectionRegistry::registerField(const std::string &fieldName,
                                            FieldType T::*field)
     {
-        if (fieldName.empty())
+        std::string className;
         {
-            throw std::invalid_argument("字段名不能为空");
+            std::unique_lock<std::mutex> lock = readLock();
+            auto it = classNames_.find(std::type_index(typeid(T)));
+            if (it == classNames_.end())
+            {
+                throw ReflectionError(ReflectionErrorCode::ClassNotFound,
+                                      "类未注册，无法注册字段");
+            }
+            className = it->second;
         }
-        auto it = classNames_.find(std::type_index(typeid(T)));
-        if (it == classNames_.end())
-        {
-            throw std::runtime_error("类未注册，无法注册字段: " + fieldName);
-        }
-        auto key = std::make_pair(it->second, fieldName);
-        setterWritable_[key] = !std::is_const<FieldType>::value;
-        setters_[key] = std::unique_ptr<PropertySetterBase>(
-            new PropertySetter<T, FieldType>(field));
-    }
-
-    template <typename T, typename ReturnType, typename... Args>
-    inline ConstMethodInvoker<T, ReturnType, Args...>::ConstMethodInvoker(MethodType method)
-        : method_(method) {}
-
-    template <typename T, typename ReturnType, typename... Args>
-    inline Any ConstMethodInvoker<T, ReturnType, Args...>::invoke(void *instance, const std::vector<Any> &args) const
-    {
-        if (args.size() != sizeof...(Args))
-            throw std::invalid_argument("参数数量不匹配");
-        const T *obj = static_cast<const T *>(instance);
-        return invokeImpl(obj, args, typename index_sequence_for<Args...>::type{},
-                          std::integral_constant<bool, std::is_void<ReturnType>::value>{});
+        addField(className, fieldName,
+                 std::unique_ptr<PropertySetterBase>(
+                     new PropertySetter<T, FieldType>(field)));
     }
 }
 

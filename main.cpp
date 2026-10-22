@@ -70,17 +70,17 @@ public:
 public:
     std::string name_; ///< 姓名（公开成员，便于测试）
     int age_;          ///< 年龄（公开成员，便于测试）
-    float money_; ///< 金钱（公开成员，便于测试）
-    double height_; ///< 身高（公开成员，便于测试）
-    bool isEmployed_; ///< 是否就业（公开成员，便于测试）
-    char gender_; ///< 性别（公开成员，便于测试）
-    long long id_; ///< ID（公开成员，便于测试）
-    unsigned int score_; ///< 分数（公开成员，便于测试）
-    unsigned long long timestamp_; ///< 时间戳（公开成员，便于测试）
-    short int level_; ///< 等级（公开成员，便于测试）
-    unsigned short int rank_; ///< 排名（公开成员，便于测试）
-    signed char grade_; ///< 成绩（公开成员，便于测试）
-    unsigned char status_; ///< 状态（公开成员，便于测试）
+    float money_ = 0.0f; ///< 金钱（公开成员，便于测试）
+    double height_ = 0.0; ///< 身高（公开成员，便于测试）
+    bool isEmployed_ = false; ///< 是否就业（公开成员，便于测试）
+    char gender_ = '\0'; ///< 性别（公开成员，便于测试）
+    long long id_ = 0; ///< ID（公开成员，便于测试）
+    unsigned int score_ = 0; ///< 分数（公开成员，便于测试）
+    unsigned long long timestamp_ = 0; ///< 时间戳（公开成员，便于测试）
+    short int level_ = 0; ///< 等级（公开成员，便于测试）
+    unsigned short int rank_ = 0; ///< 排名（公开成员，便于测试）
+    signed char grade_ = 0; ///< 成绩（公开成员，便于测试）
+    unsigned char status_ = 0; ///< 状态（公开成员，便于测试）
 
     const int constantValue_ = 42; ///< 常量值（测试const成员变量）
     const std::string constantString_ = "常量字符串"; ///< 常量字符串（测试const成员变量）
@@ -222,13 +222,11 @@ void testObjectCreation()
     auto &registry = ReflectionRegistry::getInstance();
 
     // 创建默认构造的Person对象
-    auto personPtr = registry.createInstance("Person");
-    if (personPtr)
+    ObjectHandle personPtr = registry.createInstance("Person");
+    Person *person = personPtr.get<Person>();
+    if (person != nullptr)
     {
         std::cout << "✓ 成功创建Person对象" << std::endl;
-
-        // 获取原始指针进行测试
-        Person *person = static_cast<Person *>(personPtr.get());
         std::cout << "初始姓名: " << person->name_ << ", 初始年龄: " << person->age_ << std::endl;
     }
     else
@@ -237,13 +235,12 @@ void testObjectCreation()
     }
 
     // 创建带参数的Person对象
-    auto personWithParamsPtr = registry.createInstance("PersonWithParams");
-    if (personWithParamsPtr)
+    ObjectHandle personWithParamsPtr = registry.createInstance("PersonWithParams");
+    Person *personWithParams = personWithParamsPtr.get<Person>();
+    if (personWithParams != nullptr)
     {
         std::cout << "✓ 成功创建带参数的Person对象" << std::endl;
-
-        Person *person = static_cast<Person *>(personWithParamsPtr.get());
-        std::cout << "初始姓名: " << person->name_ << ", 初始年龄: " << person->age_ << std::endl;
+        std::cout << "初始姓名: " << personWithParams->name_ << ", 初始年龄: " << personWithParams->age_ << std::endl;
     }
     else
     {
@@ -504,11 +501,13 @@ void testConstMemberAccess()
         const int constVal = any_cast<const int>(constValue);
         std::cout << "✓ constantValue: " << constVal << std::endl;
 
-        auto setter = registry.getSetter("Person", "constantValue");
-        if (setter) {
-            std::cout << "✗ 错误：不应为 const 成员暴露 setter" << std::endl;
-        } else {
-            std::cout << "✓ const 成员没有 setter（预期）" << std::endl;
+        if (!registry.isFieldWritable("Person", "constantValue"))
+        {
+            std::cout << "✓ const 成员不可写（预期）" << std::endl;
+        }
+        else
+        {
+            std::cout << "✗ 错误：const 成员不应可写" << std::endl;
         }
         Any constString = registry.getValues("Person", "constantString", &person);
         std::cout << "✓ constantString: " << any_cast<std::string>(constString) << std::endl;

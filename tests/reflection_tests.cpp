@@ -1,10 +1,13 @@
 #include "Reflection.h"
 
+#include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <iostream>
-#include <memory>
 #include <set>
 #include <string>
+#include <thread>
+#include <typeindex>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -54,11 +57,45 @@ namespace
                   << ": expected exception for: " << expression << "\n";
     }
 
+    template <typename Function>
+    void checkError(ReflectionErrorCode expected, Function function,
+                    const char *expression, const char *file, int line)
+    {
+        ++checks;
+        try
+        {
+            function();
+        }
+        catch (const ReflectionError &error)
+        {
+            if (error.code() != expected)
+            {
+                ++failures;
+                std::cerr << file << ":" << line
+                          << ": wrong error code for: " << expression << "\n";
+            }
+            return;
+        }
+        catch (...)
+        {
+            ++failures;
+            std::cerr << file << ":" << line
+                      << ": wrong exception type for: " << expression << "\n";
+            return;
+        }
+        ++failures;
+        std::cerr << file << ":" << line
+                  << ": expected ReflectionError for: " << expression << "\n";
+    }
+
 #define CHECK(expression) \
     check(static_cast<bool>(expression), #expression, __FILE__, __LINE__)
 
 #define CHECK_THROW(expression, exception_type) \
     checkThrow<exception_type>([&]() { expression; }, #expression, __FILE__, __LINE__)
+
+#define CHECK_ERROR(error_code, expression) \
+    checkError(error_code, [&]() { expression; }, #expression, __FILE__, __LINE__)
 
     class TestObject
     {
@@ -75,6 +112,11 @@ namespace
         std::string greet(const std::string &prefix) const { return prefix + name_; }
         void reset() { value_ = 0; }
         void constNoop() const {}
+
+        int overloaded(int value) { return value + 1; }
+        std::string overloaded(const std::string &value) const { return value + "!"; }
+        int qualifier() { return 1; }
+        int qualifier() const { return 2; }
 
         int value_ = 0;
         std::string name_;
@@ -112,6 +154,11 @@ namespace
         int value_ = 0;
     };
 
+    typedef int (TestObject::*OverloadedInt)(int);
+    typedef std::string (TestObject::*OverloadedString)(const std::string &) const;
+    typedef int (TestObject::*QualifierMutable)();
+    typedef int (TestObject::*QualifierConst)() const;
+
     void registerTypes()
     {
         ReflectionRegistry &registry = ReflectionRegistry::getInstance();
@@ -148,6 +195,14 @@ namespace
             "TestObject", "reset", &TestObject::reset);
         registry.registerMethod<TestObject, void>(
             "TestObject", "constNoop", &TestObject::constNoop);
+        registry.registerMethod<TestObject, int, int>(
+            "TestObject", "overloaded", static_cast<OverloadedInt>(&TestObject::overloaded));
+        registry.registerMethod<TestObject, std::string, const std::string &>(
+            "TestObject", "overloaded", static_cast<OverloadedString>(&TestObject::overloaded));
+        registry.registerMethod<TestObject, int>(
+            "TestObject", "qualifier", static_cast<QualifierMutable>(&TestObject::qualifier));
+        registry.registerMethod<TestObject, int>(
+            "TestObject", "qualifier", static_cast<QualifierConst>(&TestObject::qualifier));
 
         registry.registerClass<TestObject>("TestObject");
         registry.registerClass<TestObject, int, std::string>(
@@ -255,8 +310,13 @@ namespace
                           static_cast<short>(-7));
         checkField<float>(registry, object, "ratio", 2.5f, 2.5f);
 
-        CHECK(registry.getSetter("TestObject", "constInt") == nullptr);
-        CHECK(registry.getSetter("TestObject", "constString") == nullptr);
+        CHECK(registry.isFieldWritable("TestObject", "value"));
+        CHECK(!registry.isFieldWritable("TestObject", "constInt"));
+        CHECK(!registry.isFieldWritable("TestObject", "constString"));
+        CHECK_ERROR(ReflectionErrorCode::FieldNotWritable,
+                    (registry.getSetter("TestObject", "constInt")));
+        CHECK_ERROR(ReflectionErrorCode::FieldNotWritable,
+                    (registry.getSetter("TestObject", "constString")));
 
         Any constInt = registry.getValues("TestObject", "constInt", &object);
         CHECK(any_cast<int>(constInt) == 42);
@@ -275,29 +335,35 @@ namespace
         CHECK(any_cast<std::string>(values["name"]) == "Alice");
         CHECK(any_cast<int>(values["constInt"]) == 42);
 
-        CHECK(registry.getSetter("TestObject", "missing") == nullptr);
-        CHECK(registry.getValues("TestObject", "missing", &object).empty());
+        CHECK(!registry.hasField("TestObject", "missing"));
+        CHECK_ERROR(ReflectionErrorCode::FieldNotFound,
+                    (registry.getValues("TestObject", "missing", &object)));
+        CHECK_ERROR(ReflectionErrorCode::FieldNotFound,
+                    (registry.getSetter("TestObject", "missing")));
 
         PropertySetterBase *setter = registry.getSetter("TestObject", "value");
         CHECK(setter != nullptr);
         if (setter)
         {
-            CHECK_THROW((setter->get(nullptr)), std::invalid_argument);
-            CHECK_THROW((setter->set(nullptr, Any(1))), std::invalid_argument);
-            CHECK_THROW((setter->set(&object, Any(std::string("bad")))),
-                        std::invalid_argument);
+            CHECK_ERROR(ReflectionErrorCode::InvalidInstance,
+                        (setter->get(nullptr)));
+            CHECK_ERROR(ReflectionErrorCode::InvalidInstance,
+                        (setter->set(nullptr, Any(1))));
+            CHECK_ERROR(ReflectionErrorCode::FieldTypeMismatch,
+                        (setter->set(&object, Any(std::string("bad")))));
         }
 
-        CHECK_THROW((registry.getValues("TestObject", "value", nullptr)),
-                    std::invalid_argument);
-        CHECK_THROW((registry.getAllValues("TestObject", nullptr)),
-                    std::invalid_argument);
+        CHECK_ERROR(ReflectionErrorCode::InvalidInstance,
+                    (registry.getValues("TestObject", "value", nullptr)));
+        CHECK_ERROR(ReflectionErrorCode::InvalidInstance,
+                    (registry.getAllValues("TestObject", nullptr)));
     }
 
     void testMethods()
     {
         ReflectionRegistry &registry = ReflectionRegistry::getInstance();
         TestObject object(3, "Bob");
+        const TestObject constObject(4, "Const");
 
         registry.invokeMethod("TestObject", "setValue", &object, {Any(10)});
         CHECK(object.value_ == 10);
@@ -322,116 +388,355 @@ namespace
         CHECK(object.value_ == 0);
         registry.invokeMethod("TestObject", "constNoop", &object, {});
 
-        CHECK_THROW((registry.invokeMethod("TestObject", "setValue", &object, {})),
-                    std::invalid_argument);
-        CHECK_THROW((registry.invokeMethod("TestObject", "add", &object, {Any(1)})),
-                    std::invalid_argument);
-        CHECK_THROW((registry.invokeMethod("TestObject", "add3", &object,
-                                           {Any(1), Any(2)})),
-                    std::invalid_argument);
-        CHECK_THROW((registry.invokeMethod(
-                        "TestObject", "setValue", &object,
-                        {Any(std::string("bad"))})),
-                    bad_any_cast);
-        CHECK_THROW((registry.invokeMethod("TestObject", "missing", &object, {})),
-                    std::runtime_error);
-        CHECK_THROW((registry.invokeMethod("TestObject", "getValue", nullptr, {})),
-                    std::runtime_error);
-        CHECK_THROW((registry.invokeMethod("Missing", "getValue", &object, {})),
-                    std::runtime_error);
+        CHECK(any_cast<int>(registry.invokeMethod(
+                  "TestObject", "overloaded", &object, {Any(5)})) == 6);
+        CHECK(any_cast<std::string>(registry.invokeMethod(
+                  "TestObject", "overloaded", &object,
+                  {Any(std::string("hello"))})) == "hello!");
+        CHECK(any_cast<int>(registry.invokeMethod(
+                  "TestObject", "qualifier", &object, {})) == 1);
+
+        CHECK(any_cast<int>(registry.invokeMethod(
+                  "TestObject", "getValue", &constObject, {})) == 4);
+        CHECK(any_cast<std::string>(registry.invokeMethod(
+                  "TestObject", "greet", &constObject,
+                  {Any(std::string("Hi "))})) == "Hi Const");
+        CHECK(any_cast<int>(registry.invokeMethod(
+                  "TestObject", "qualifier", &constObject, {})) == 2);
+        registry.invokeMethod("TestObject", "constNoop", &constObject, {});
+        CHECK_ERROR(ReflectionErrorCode::InvalidInstance,
+                    (registry.invokeMethod("TestObject", "setValue", &constObject,
+                                           {Any(1)})));
+
+        CHECK_ERROR(ReflectionErrorCode::ArgumentCountMismatch,
+                    (registry.invokeMethod("TestObject", "setValue", &object, {})));
+        CHECK_ERROR(ReflectionErrorCode::ArgumentCountMismatch,
+                    (registry.invokeMethod("TestObject", "add", &object, {Any(1)})));
+        CHECK_ERROR(ReflectionErrorCode::ArgumentCountMismatch,
+                    (registry.invokeMethod("TestObject", "overloaded", &object, {})));
+        CHECK_ERROR(ReflectionErrorCode::ArgumentTypeMismatch,
+                    (registry.invokeMethod("TestObject", "setValue", &object,
+                                           {Any(std::string("bad"))})));
+        CHECK_ERROR(ReflectionErrorCode::ArgumentTypeMismatch,
+                    (registry.invokeMethod("TestObject", "overloaded", &object,
+                                           {Any(1.5)})));
+        CHECK_ERROR(ReflectionErrorCode::MethodNotFound,
+                    (registry.invokeMethod("TestObject", "missing", &object, {})));
+        CHECK_ERROR(ReflectionErrorCode::ClassNotFound,
+                    (registry.invokeMethod("Missing", "getValue", &object, {})));
+        CHECK_ERROR(ReflectionErrorCode::InvalidInstance,
+                    (registry.invokeMethod("TestObject", "getValue", nullptr, {})));
 
         std::set<std::string> names = registry.getMethodNames("TestObject");
+        CHECK(names.size() == 11u);
         CHECK(names.count("setValue") == 1u);
-        CHECK(names.count("getValue") == 1u);
-        CHECK(names.count("getValueMutable") == 1u);
-        CHECK(names.count("add") == 1u);
-        CHECK(names.count("add3") == 1u);
-        CHECK(names.count("setName") == 1u);
-        CHECK(names.count("greet") == 1u);
-        CHECK(names.count("reset") == 1u);
-        CHECK(names.count("constNoop") == 1u);
-        CHECK(registry.getMethodNames("Missing").empty());
+        CHECK(names.count("overloaded") == 1u);
+        CHECK(names.count("qualifier") == 1u);
+        CHECK(registry.hasMethod("TestObject", "add"));
+        CHECK(!registry.hasMethod("TestObject", "missing"));
         CHECK(registry.getClassName<TestObject>() == "TestObject");
-        CHECK(registry.getClassName<Unregistered>() == "unregistered");
+        CHECK(registry.hasClassName<TestObject>());
+        CHECK_ERROR(ReflectionErrorCode::ClassNotFound,
+                    (registry.getMethodNames("Missing")));
     }
 
     void testFactory()
     {
         ReflectionRegistry &registry = ReflectionRegistry::getInstance();
 
-        std::unique_ptr<void, void (*)(void *)> object =
-            registry.createInstance("TestObject");
-        CHECK(object.get() != nullptr);
-        if (object)
+        ObjectHandle object = registry.createInstance("TestObject");
+        CHECK(static_cast<bool>(object));
+        CHECK(!object.empty());
+        CHECK(object.type() == typeid(TestObject));
+        TestObject *value = object.get<TestObject>();
+        CHECK(value != nullptr);
+        if (value)
         {
-            TestObject *value = static_cast<TestObject *>(object.get());
             CHECK(value->value_ == 0);
         }
+        CHECK(object.get<NoDefault>() == nullptr);
 
-        std::unique_ptr<void, void (*)(void *)> withArgs =
-            registry.createInstance("TestObjectWithArgs");
-        CHECK(withArgs.get() != nullptr);
-        if (withArgs)
+        ObjectHandle copy = object;
+        CHECK(copy.get<TestObject>() == value);
+        ObjectHandle moved(std::move(copy));
+        CHECK(copy.empty());
+        CHECK(moved.get<TestObject>() == value);
+
+        ObjectHandle empty;
+        CHECK(!empty);
+        CHECK(empty.type() == typeid(void));
+
+        ObjectHandle direct = ObjectHandle::create<NoDefault>(11);
+        NoDefault *directValue = direct.get<NoDefault>();
+        CHECK(directValue != nullptr);
+        if (directValue)
         {
-            TestObject *value = static_cast<TestObject *>(withArgs.get());
-            CHECK(value->value_ == 7);
-            CHECK(value->name_ == "seven");
+            CHECK(directValue->value_ == 11);
         }
 
-        std::unique_ptr<void, void (*)(void *)> noDefault =
-            registry.createInstance("NoDefaultWithArgs");
-        CHECK(noDefault.get() != nullptr);
-        if (noDefault)
+        ObjectHandle withArgs = registry.createInstance("TestObjectWithArgs");
+        TestObject *withArgsValue = withArgs.get<TestObject>();
+        CHECK(withArgsValue != nullptr);
+        if (withArgsValue)
         {
-            NoDefault *value = static_cast<NoDefault *>(noDefault.get());
-            CHECK(value->value_ == 9);
+            CHECK(withArgsValue->value_ == 7);
+            CHECK(withArgsValue->name_ == "seven");
         }
 
-        std::unique_ptr<void, void (*)(void *)> missing =
-            registry.createInstance("Missing");
-        CHECK(missing.get() == nullptr);
+        ObjectHandle noDefault = registry.createInstance("NoDefaultWithArgs");
+        NoDefault *noDefaultValue = noDefault.get<NoDefault>();
+        CHECK(noDefaultValue != nullptr);
+        if (noDefaultValue)
+        {
+            CHECK(noDefaultValue->value_ == 9);
+        }
+
+        CHECK_ERROR(ReflectionErrorCode::ClassNotFound,
+                    (registry.createInstance("Missing")));
 
         Lifetime::alive_ = 0;
         {
-            std::unique_ptr<void, void (*)(void *)> lifetime =
-                registry.createInstance("Lifetime");
-            CHECK(lifetime.get() != nullptr);
+            ObjectHandle lifetime = registry.createInstance("Lifetime");
+            CHECK(static_cast<bool>(lifetime));
             CHECK(Lifetime::alive_ == 1);
+            lifetime.reset();
+            CHECK(Lifetime::alive_ == 0);
+            CHECK(!lifetime);
         }
         CHECK(Lifetime::alive_ == 0);
+    }
+
+    void testMetadata()
+    {
+        ReflectionRegistry &registry = ReflectionRegistry::getInstance();
+        std::vector<std::string> classNames = registry.getClassNames();
+        CHECK(std::find(classNames.begin(), classNames.end(), "TestObject") !=
+              classNames.end());
+        CHECK(std::find(classNames.begin(), classNames.end(), "TestObjectWithArgs") !=
+              classNames.end());
+        CHECK(registry.hasClass("TestObject"));
+        CHECK(!registry.hasClass("Missing"));
+
+        std::vector<FieldInfo> fields = registry.getFields("TestObject");
+        CHECK(fields.size() == 11u);
+        bool foundValue = false;
+        bool foundConst = false;
+        for (std::size_t index = 0; index < fields.size(); ++index)
+        {
+            if (fields[index].name == "value")
+            {
+                foundValue = true;
+                CHECK(fields[index].type == std::type_index(typeid(int)));
+                CHECK(fields[index].writable);
+            }
+            if (fields[index].name == "constInt")
+            {
+                foundConst = true;
+                CHECK(fields[index].type == std::type_index(typeid(int)));
+                CHECK(!fields[index].writable);
+            }
+        }
+        CHECK(foundValue);
+        CHECK(foundConst);
+
+        std::vector<MethodInfo> methods = registry.getMethods("TestObject");
+        CHECK(methods.size() == 13u);
+        bool foundIntOverload = false;
+        bool foundStringOverload = false;
+        bool foundMutableQualifier = false;
+        bool foundConstQualifier = false;
+        bool foundGreet = false;
+        for (std::size_t index = 0; index < methods.size(); ++index)
+        {
+            const MethodInfo &method = methods[index];
+            if (method.name == "overloaded" && method.arity == 1u &&
+                method.parameterTypes.size() == 1u &&
+                method.parameterTypes[0] == std::type_index(typeid(int)))
+            {
+                foundIntOverload = true;
+            }
+            if (method.name == "overloaded" && method.arity == 1u &&
+                method.parameterTypes.size() == 1u &&
+                method.parameterTypes[0] == std::type_index(typeid(std::string)))
+            {
+                foundStringOverload = true;
+                CHECK(method.isConst);
+            }
+            if (method.name == "qualifier" && method.arity == 0u)
+            {
+                if (method.isConst)
+                {
+                    foundConstQualifier = true;
+                }
+                else
+                {
+                    foundMutableQualifier = true;
+                }
+            }
+            if (method.name == "greet")
+            {
+                foundGreet = true;
+                CHECK(method.isConst);
+                CHECK(method.returnType == std::type_index(typeid(std::string)));
+            }
+        }
+        CHECK(foundIntOverload);
+        CHECK(foundStringOverload);
+        CHECK(foundMutableQualifier);
+        CHECK(foundConstQualifier);
+        CHECK(foundGreet);
+
+        ClassInfo info = registry.getClassInfo("TestObject");
+        CHECK(info.name == "TestObject");
+        CHECK(info.fields.size() == fields.size());
+        CHECK(info.methods.size() == methods.size());
+
+        CHECK_ERROR(ReflectionErrorCode::ClassNotFound,
+                    (registry.getFields("Missing")));
+        CHECK_ERROR(ReflectionErrorCode::ClassNotFound,
+                    (registry.getMethods("Missing")));
+        CHECK_ERROR(ReflectionErrorCode::ClassNotFound,
+                    (registry.getClassInfo("Missing")));
     }
 
     void testRegistrationErrors()
     {
         ReflectionRegistry &registry = ReflectionRegistry::getInstance();
+        TestObject object;
 
-        CHECK_THROW((registry.registerClassName<TestObject>("")),
-                    std::invalid_argument);
-        CHECK(registry.getClassName<TestObject>() == "TestObject");
+        CHECK(registry.hasClass("TestObject"));
+        CHECK(registry.hasField("TestObject", "value"));
+        CHECK(!registry.hasField("TestObject", "missing"));
+        CHECK(registry.hasMethod("TestObject", "add"));
+        CHECK(!registry.hasMethod("TestObject", "missing"));
+        CHECK(registry.isFieldWritable("TestObject", "value"));
+        CHECK(!registry.isFieldWritable("TestObject", "constInt"));
+        CHECK(registry.hasClassName<TestObject>());
+        CHECK(!registry.hasClassName<Unregistered>());
+        CHECK_ERROR(ReflectionErrorCode::FieldNotFound,
+                    (registry.isFieldWritable("TestObject", "missing")));
+        CHECK_ERROR(ReflectionErrorCode::ClassNotFound,
+                    (registry.getClassName<Unregistered>()));
 
-        CHECK_THROW((registry.registerField<TestObject>(
-                        "", "value", &TestObject::value_)),
-                    std::invalid_argument);
-        CHECK_THROW((registry.registerField<TestObject>(
-                        "TestObject", "", &TestObject::value_)),
-                    std::invalid_argument);
-        CHECK_THROW((registry.registerField<TestObject>(
-                        "", &TestObject::value_)),
-                    std::invalid_argument);
-        CHECK_THROW((registry.registerField<Unregistered>(
-                        "value", &Unregistered::value_)),
-                    std::runtime_error);
+        CHECK_ERROR(ReflectionErrorCode::InvalidArgument,
+                    (registry.registerClassName<TestObject>("")));
+        CHECK_ERROR(ReflectionErrorCode::InvalidArgument,
+                    (registry.registerField<TestObject>("", "value",
+                                                        &TestObject::value_)));
+        CHECK_ERROR(ReflectionErrorCode::InvalidArgument,
+                    (registry.registerField<TestObject>("TestObject", "",
+                                                        &TestObject::value_)));
+        CHECK_ERROR(ReflectionErrorCode::InvalidArgument,
+                    (registry.registerField<TestObject>("",
+                                                        &TestObject::value_)));
+        CHECK_ERROR(ReflectionErrorCode::InvalidArgument,
+                    (registry.registerMethod<TestObject, void>(
+                        "TestObject", "", &TestObject::reset)));
+        CHECK_ERROR(ReflectionErrorCode::InvalidArgument,
+                    (registry.registerMethod<TestObject, void>(
+                        "", "reset", &TestObject::reset)));
+        CHECK_ERROR(ReflectionErrorCode::InvalidArgument,
+                    (registry.registerClass<TestObject>("")));
+        CHECK_ERROR(ReflectionErrorCode::InvalidArgument,
+                    (registry.registerClass<NoDefault, int>("", 1)));
 
-        CHECK_THROW((registry.registerMethod<TestObject, void>(
-                        "TestObject", "", &TestObject::reset)),
-                    std::invalid_argument);
-        CHECK_THROW((registry.registerMethod<TestObject, void>(
-                        "", "reset", &TestObject::reset)),
-                    std::invalid_argument);
-        CHECK_THROW((registry.registerClass<TestObject>("")),
-                    std::invalid_argument);
-        CHECK_THROW((registry.registerClass<NoDefault, int>("", 1)),
-                    std::invalid_argument);
+        CHECK_ERROR(ReflectionErrorCode::ClassNotFound,
+                    (registry.registerField<Unregistered>(
+                        "value", &Unregistered::value_)));
+
+        CHECK_ERROR(ReflectionErrorCode::DuplicateRegistration,
+                    (registry.registerClassName<TestObject>("Other")));
+        CHECK_ERROR(ReflectionErrorCode::DuplicateRegistration,
+                    (registry.registerField<TestObject>(
+                        "TestObject", "value", &TestObject::value_)));
+        CHECK_ERROR(ReflectionErrorCode::DuplicateRegistration,
+                    (registry.registerMethod<TestObject, int, int, int>(
+                        "TestObject", "add", &TestObject::add)));
+        CHECK_ERROR(ReflectionErrorCode::DuplicateRegistration,
+                    (registry.registerMethod<TestObject, int>(
+                        "TestObject", "getValue", &TestObject::getValue)));
+        CHECK_ERROR(ReflectionErrorCode::DuplicateRegistration,
+                    (registry.registerClass<TestObject>("TestObject")));
+
+        CHECK_ERROR(ReflectionErrorCode::FieldNotWritable,
+                    (registry.getSetter("TestObject", "constInt")));
+        CHECK_ERROR(ReflectionErrorCode::FieldNotFound,
+                    (registry.getSetter("TestObject", "missing")));
+        CHECK_ERROR(ReflectionErrorCode::ClassNotFound,
+                    (registry.getSetter("Missing", "value")));
+        CHECK_ERROR(ReflectionErrorCode::ClassNotFound,
+                    (registry.getValues("Missing", "value", &object)));
+        CHECK_ERROR(ReflectionErrorCode::ClassNotFound,
+                    (registry.getAllValues("Missing", &object)));
+        CHECK_ERROR(ReflectionErrorCode::FieldNotFound,
+                    (registry.getValues("TestObject", "missing", &object)));
+    }
+
+    void testThreadSafety()
+    {
+        ReflectionRegistry &registry = ReflectionRegistry::getInstance();
+        TestObject object(3, "Bob");
+
+        registry.freeze();
+        CHECK(registry.isFrozen());
+
+        CHECK_ERROR(ReflectionErrorCode::RegistryFrozen,
+                    (registry.registerClass<NoDefault, int>(
+                        "NoDefaultFrozen", 1)));
+        CHECK_ERROR(ReflectionErrorCode::RegistryFrozen,
+                    (registry.registerField<TestObject>(
+                        "TestObject", "frozenField", &TestObject::value_)));
+        CHECK_ERROR(ReflectionErrorCode::RegistryFrozen,
+                    (registry.registerMethod<TestObject, int, int, int>(
+                        "TestObject", "frozenMethod", &TestObject::add)));
+        CHECK_ERROR(ReflectionErrorCode::RegistryFrozen,
+                    (registry.registerClassName<NoDefault>("NoDefaultFrozenName")));
+
+        std::atomic<int> errors(0);
+        std::vector<std::thread> threads;
+        for (int threadIndex = 0; threadIndex < 4; ++threadIndex)
+        {
+            threads.push_back(std::thread([&registry, &object, &errors]() {
+                try
+                {
+                    for (int index = 0; index < 500; ++index)
+                    {
+                        Any value = registry.getValues("TestObject", "value", &object);
+                        if (any_cast<int>(value) != 3)
+                        {
+                            ++errors;
+                        }
+                        Any result = registry.invokeMethod(
+                            "TestObject", "add", &object, {Any(1), Any(2)});
+                        if (any_cast<int>(result) != 3)
+                        {
+                            ++errors;
+                        }
+                        if (!registry.hasField("TestObject", "value"))
+                        {
+                            ++errors;
+                        }
+                        if (registry.getFields("TestObject").size() != 11u)
+                        {
+                            ++errors;
+                        }
+                        if (registry.getMethods("TestObject").size() != 13u)
+                        {
+                            ++errors;
+                        }
+                    }
+                }
+                catch (...)
+                {
+                    ++errors;
+                }
+            }));
+        }
+        for (std::size_t index = 0; index < threads.size(); ++index)
+        {
+            threads[index].join();
+        }
+        CHECK(errors.load() == 0);
     }
 
     struct TestCase
@@ -445,7 +750,9 @@ namespace
         {"Fields", testFields},
         {"Methods", testMethods},
         {"Factory", testFactory},
-        {"RegistrationErrors", testRegistrationErrors}};
+        {"Metadata", testMetadata},
+        {"RegistrationErrors", testRegistrationErrors},
+        {"ThreadSafety", testThreadSafety}};
 }
 
 int main(int argc, char **argv)

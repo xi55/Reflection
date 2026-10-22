@@ -1,10 +1,10 @@
 # AGENTS.md
 
 ## 项目与目标
-- `Evently` 命名空间下的 C++ 运行时反射库。`Reflection.h` 是接口和模板实现，`Reflection.cpp` 是注册中心/哈希实现（必须参与链接，非 header-only），`Any.h` 是替代 `std::any` 的类型擦除容器，`IndexSequence.h` 是 C++11 版 `index_sequence`。
-- `main.cpp` 是演示程序；真正的回归测试在 `tests/reflection_tests.cpp`。`scripts/build-msvc.ps1` 负责 Windows 的 VS + SDK 环境。
-- CMake 生成静态库 `evently_reflection`、演示程序 `Test` 和测试程序 `ReflectionTests`，测试通过 CTest 运行。
-- 改造目标：库代码同时兼容 C++11 与 C++17；Linux 用 GCC，Windows 用 MSVC。库头文件中不得使用 C++14/17 专属语法或库设施。
+- `Evently` 命名空间下的 C++ 运行时反射库。`Reflection.h` 是接口/模板实现，`Reflection.cpp` 是注册中心实现（必须链接，非 header-only），`Any.h` 是类型擦除容器，`IndexSequence.h` 是 C++11 版 `index_sequence`，`ObjectHandle.h` 是对象所有权句柄，`ReflectionError.h` 是统一错误类型。
+- `main.cpp` 是演示程序；回归测试在 `tests/reflection_tests.cpp`。`scripts/build-msvc.ps1` 负责 Windows 的 VS + SDK 环境。
+- CMake 生成静态库 `evently_reflection`（别名/安装目标 `Evently::Reflection`）、演示程序 `Test` 和测试程序 `ReflectionTests`；支持 install/export 与 CTest。
+- 目标：库代码同时兼容 C++11 与 C++17；Linux 用 GCC，Windows 用 MSVC。库头文件中不得使用 C++14/17 专属语法或库设施。
 
 ## 构建与验证
 - Linux/GCC C++11：
@@ -17,25 +17,27 @@
   C++17 用 `-Standard 17`。构建目录是 `build\msvc-cxx14` / `build\msvc-cxx17`。
 - MSVC 没有 `/std:c++11`；CMake 的 `CXX_STANDARD 11` 在 MSVC 上不加 `/std` 参数，实际使用默认 C++14。真正的 C++11 门槛是 GCC 的 `-std=c++11`。
 - CMake 变量 `EVENTLY_CXX_STANDARD` 可取 `11/14/17`，默认 `11`；`CXX_EXTENSIONS OFF`。
-- 单测：`build\msvc-cxx14\ReflectionTests.exe --test Any`，或 `ctest --test-dir build\msvc-cxx14 -R reflection_tests --output-on-failure`。测试组：`Any`、`Fields`、`Methods`、`Factory`、`RegistrationErrors`。
-- 源文件是无 BOM 的 UTF-8，含中文注释和字符串；MSVC 的 `/utf-8` 已由 CMake 统一加上，不要移除。
+- 单测：`build\msvc-cxx14\ReflectionTests.exe --test Any`，或 `ctest --test-dir build\msvc-cxx14 -R reflection_tests --output-on-failure`。测试组：`Any`、`Fields`、`Methods`、`Factory`、`Metadata`、`RegistrationErrors`、`ThreadSafety`，共 190 项断言。
+- 源文件是无 BOM 的 UTF-8，含中文注释和字符串；MSVC 的 `/utf-8` 已由 CMake 统一加到库和测试，并通过 `evently_reflection` 的 INTERFACE 选项传播给安装后的消费方，不要移除。
 - 本机 Windows SDK 在 `D:\Windows Kits\10`，但 SDK 注册表键可能缺失：单独运行 `vcvars64.bat` 只会设置 MSVC 的 `INCLUDE/LIB`，不会设置 UCRT/SDK。使用 `scripts/build-msvc.ps1`，或手动注入 SDK 的 `INCLUDE/LIB/PATH`；Debug 程序还需要 SDK 的 `ucrt` 运行时目录和 MSVC Debug CRT 目录。
-- Windows 默认使用静态 MSVC 运行时（Debug `/MTd`，Release `/MT`），所以 `Test.exe`/`ReflectionTests.exe` 可以在普通 PowerShell 中直接运行。若把 `evently_reflection` 链接到 `/MD` 项目，必须统一 `CMAKE_MSVC_RUNTIME_LIBRARY`。
-- 没有 install/export；当前只构建库、演示和测试。
+- Windows 默认使用静态 MSVC 运行时（Debug `/MTd`，Release `/MT`），所以 `Test.exe`/`ReflectionTests.exe` 可以在普通 PowerShell 中直接运行。若把 `evently_reflection` 链接到 `/MD` 项目，必须统一 `CMAKE_MSVC_RUNTIME_LIBRARY`；安装包只包含本次构建配置，Debug/Release 也要匹配。
+- 安装：`cmake --install build/gcc-cxx11 --prefix install`。消费方用 `find_package(Evently CONFIG REQUIRED)`、`target_link_libraries(app PRIVATE Evently::Reflection)`、`#include <Evently/Reflection.h>`。
 
 ## 已知陷阱
 - `Any` 的存储类型统一 decay。`any_cast<const T>`、`any_cast<const T&>` 是安全的；非 const `T&` 只能从非 const `Any` 取；`any_cast<T&>(const Any&)` 会触发 `static_assert`。不要重新引入 `Holder<T&>` / `Holder<const T>` 的向下转型。
 - `getParam` 在编译期拒绝非 const 左值引用和右值引用参数；反射方法参数只能按值或 const 引用传递。
-- `registerField<T>(fieldName, field)` 依赖先调用 `registerClassName<T>`；未注册时会抛 `std::runtime_error`，不会静默注册到空类名。类名内部索引是 `std::type_index`，对外仍使用显式字符串。
-- `registerClass` 使用 `ObjectFactorySelector` 选择工厂，避免两个分支同时实例化；无默认构造函数的 T 必须带构造参数注册。
-- 注册中心不是线程安全的；应在启动阶段完成注册，之后只读使用，或显式加锁。
-- `ReflectionRegistry` 是单例且没有 `clear()`；测试使用不同类名隔离状态。
-- `createInstance` 对未知类返回空 `unique_ptr`；`getSetter` 对缺失字段和 const 字段都返回 `nullptr`；`getValues` 缺失时返回空 `Any`；`invokeMethod` 的未知方法/空实例抛异常。不要假设所有查询都抛异常。
+- `registerField<T>(fieldName, field)` 依赖先调用 `registerClassName<T>`；未注册时抛 `ReflectionError(ClassNotFound)`。
+- `registerClass` 使用 `ObjectFactorySelector` 选择工厂，避免两个分支同时实例化；无默认构造函数的 T 必须带构造参数注册。字段/方法/工厂/类名重复注册默认抛 `ReflectionError(DuplicateRegistration)`。
+- 注册中心使用“冻结后只读”模型：启动阶段注册，`freeze()` 之后禁止注册；冻结后读操作无锁且可并发。冻结前不要并发注册/查询，也不要在冻结前长期持有 `getSetter` 返回的指针。
+- `ReflectionRegistry` 是单例且没有 `clear()`；测试使用不同类名隔离状态，不要重复注册同一签名。
+- `createInstance` 返回 `ObjectHandle`，未知类抛 `ReflectionError(ClassNotFound)`；`getSetter` 对缺失字段抛 `FieldNotFound`，对 const 字段抛 `FieldNotWritable`；`getValues`/`getAllValues`/`getMethodNames` 对缺失项抛错；用 `hasClass`/`hasField`/`hasMethod`/`isFieldWritable` 做非抛出查询。
+- 方法重载按参数数量和精确 `type_index` 匹配，不做隐式数值转换；`invokeMethod` 对 const 实例只允许 const 方法，非 const 方法会抛 `InvalidInstance`。`nullptr` 实例由 `std::nullptr_t` 重载处理，避免 `void*`/`const void*` 歧义。
+- `ObjectHandle::get<T>()` 只接受精确类型（忽略 cv），不做基类转换；不匹配返回 `nullptr`。
 - 不要在库头文件中引入 `<windows.h>`、`<cxxabi.h>` 等平台头；`main.cpp` 里的控制台 UTF-8 设置只属于演示。
 - `main.cpp` 中的测试函数是演示输出，不是回归门槛；改行为时以 `ReflectionTests` 为准。
-- 保持 C++11 写法：不用 `std::make_unique`、`if constexpr`、泛型 lambda、`std::optional`/`std::string_view`。
+- 保持 C++11 写法：不用 `std::make_unique`、`if constexpr`、泛型 lambda、`std::optional`/`std::string_view`、`std::shared_mutex`。
 
 ## 代码约定
-- 注册键是字符串对 `(className, memberName)`；通过单例 `ReflectionRegistry::getInstance()` 注册和查询；错误抛 `std::invalid_argument`/`std::runtime_error`。
+- 注册键是字符串对 `(className, memberName)`；通过单例 `ReflectionRegistry::getInstance()` 注册和查询；库错误统一抛 `ReflectionError`（`std::runtime_error` 派生），不要混用空 `Any`/`nullptr` 表示错误。
 - 类型 PascalCase、方法 camelCase、成员尾部下划线；注释和异常信息用中文，与现有代码一致。
 - 修改模板代码后至少跑 Windows C++14/C++17；能访问 WSL 时再跑 GCC C++11/C++17。

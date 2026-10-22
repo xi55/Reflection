@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [g++, clang++]
+        standard: [11, 17]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_CXX_COMPILER=${{ matrix.compiler }}
+          -DEVENTLY_CXX_STANDARD=${{ matrix.standard }}
+      - name: Build
+        run: cmake --build build -j
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+      - name: Install
+        run: cmake --install build --prefix "${{ github.workspace }}/install"
+      - name: Consumer
+        run: |
+          cmake -S examples/consumer -B consumer-build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="${{ github.workspace }}/install"
+          cmake --build consumer-build -j
+          ./consumer-build/evently_consumer
+
+  windows:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        standard: [14, 17]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -DEVENTLY_CXX_STANDARD=${{ matrix.standard }}
+      - name: Build
+        run: cmake --build build --config Debug
+      - name: Test
+        run: ctest --test-dir build -C Debug --output-on-failure
+      - name: Install
+        run: cmake --install build --config Debug --prefix "${{ github.workspace }}/install"
+      - name: Consumer
+        run: |
+          cmake -S examples/consumer -B consumer-build -DCMAKE_PREFIX_PATH="${{ github.workspace }}/install"
+          cmake --build consumer-build --config Debug
+          .\consumer-build\Debug\evently_consumer.exe
+
+  sanitizers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+          -DEVENTLY_CXX_STANDARD=17
+          -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+      - name: Build
+        run: cmake --build build -j
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  thread-sanitizer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+          -DEVENTLY_CXX_STANDARD=17
+          -DCMAKE_CXX_FLAGS="-fsanitize=thread -fno-omit-frame-pointer"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
+      - name: Build
+        run: cmake --build build -j
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
