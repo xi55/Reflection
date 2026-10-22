@@ -530,29 +530,21 @@ namespace Evently
 
     namespace detail
     {
+        struct RegistryData;
+
         struct FreeFunctionTag
         {
         };
 
-        class EVENTLY_API RegistrationQueue
-        {
-        public:
-            static RegistrationQueue &getInstance();
-            void add(void (*function)());
-            void runAll();
-
-        private:
-            RegistrationQueue() {}
-            std::mutex mutex_;
-            std::vector<void (*)()> functions_;
-        };
+        EVENTLY_API void enqueueRegistration(void (*function)());
+        EVENTLY_API void runRegistrationQueue();
 
         class StaticRegistrar
         {
         public:
             explicit StaticRegistrar(void (*function)())
             {
-                RegistrationQueue::getInstance().add(function);
+                enqueueRegistration(function);
             }
         };
     }
@@ -561,6 +553,7 @@ namespace Evently
     {
     public:
         static ReflectionRegistry &getInstance();
+        ~ReflectionRegistry();
 
         template <typename T>
         void registerClassName(const std::string &className);
@@ -717,57 +710,30 @@ namespace Evently
         ReflectionRegistry(const ReflectionRegistry &) = delete;
         ReflectionRegistry &operator=(const ReflectionRegistry &) = delete;
 
-        struct RegistryData
-        {
-            std::unordered_map<std::pair<std::string, std::string>,
-                               std::shared_ptr<PropertySetterBase>,
-                               PairHash, PairEqual>
-                setters;
-
-            std::unordered_map<std::pair<std::string, std::string>,
-                               std::vector<std::shared_ptr<MethodInvokerBase>>,
-                               PairHash, PairEqual>
-                methods;
-
-            std::unordered_map<
-                std::string,
-                std::vector<std::shared_ptr<ConstructorInvokerBase>>>
-                constructors;
-
-            std::unordered_map<std::string, std::set<std::string>> methodNames;
-            std::unordered_map<std::type_index, std::string> classNames;
-            std::unordered_map<std::string, std::type_index> classNameOwners;
-            std::set<std::string> classNamesSet;
-            std::unordered_map<std::string, std::shared_ptr<ObjectFactory>>
-                factories;
-        };
-
-        struct WriteContext
-        {
-            std::unique_lock<std::mutex> lock;
-            std::shared_ptr<RegistryData> data;
-            bool batched;
-
-            WriteContext() : batched(false) {}
-        };
+        struct Impl;
 
         friend class RegistrationBatch;
 
-        std::shared_ptr<const RegistryData> snapshot() const;
-        std::shared_ptr<RegistryData> copyData() const;
-        void publish(const std::shared_ptr<RegistryData> &data);
+        std::shared_ptr<const detail::RegistryData> snapshot() const;
+        std::shared_ptr<detail::RegistryData> copyData() const;
+        void publish(const std::shared_ptr<detail::RegistryData> &data);
 
-        WriteContext beginWrite();
-        void endWrite(WriteContext &context);
+        std::shared_ptr<detail::RegistryData> beginWrite(std::unique_lock<std::mutex> &lock,
+                                                 bool &batched);
+        void endWrite(const std::shared_ptr<detail::RegistryData> &data, bool batched);
 
         std::unique_lock<std::mutex> acquireBatchLock();
         void startBatch();
         void commitBatch();
         void abortBatch();
 
-        static void ensureClass(RegistryData &data,
+        std::string getClassNameByType(const std::type_index &type) const;
+        bool hasClassNameByType(const std::type_index &type) const;
+        std::string resolveClassNameByType(const std::type_index &type) const;
+
+        static void ensureClass(detail::RegistryData &data,
                                 const std::string &className);
-        static void checkClassNameOwner(RegistryData &data,
+        static void checkClassNameOwner(detail::RegistryData &data,
                                         const std::type_index &type,
                                         const std::string &className);
 
@@ -788,10 +754,7 @@ namespace Evently
                              const void *instance, InstanceKind kind,
                              const std::vector<Any> &args) const;
 
-        std::shared_ptr<const RegistryData> data_;
-        std::shared_ptr<RegistryData> batchData_;
-        std::mutex writeMutex_;
-        std::atomic<bool> frozen_;
+        Impl *impl_;
     };
 
     class EVENTLY_API RegistrationBatch
@@ -806,9 +769,26 @@ namespace Evently
         RegistrationBatch(const RegistrationBatch &) = delete;
         RegistrationBatch &operator=(const RegistrationBatch &) = delete;
 
-        ReflectionRegistry *registry_;
-        std::unique_lock<std::mutex> lock_;
-        bool committed_;
+        struct Impl;
+        Impl *impl_;
+    };
+
+    class EVENTLY_API PluginRegistration
+    {
+    public:
+        PluginRegistration(ReflectionRegistry &registry,
+                           const std::string &moduleName);
+        ~PluginRegistration();
+
+        void detach();
+        const std::string &moduleName() const;
+
+    private:
+        PluginRegistration(const PluginRegistration &) = delete;
+        PluginRegistration &operator=(const PluginRegistration &) = delete;
+
+        struct Impl;
+        Impl *impl_;
     };
 
     template <typename T>
@@ -952,22 +932,13 @@ namespace Evently
     template <typename T>
     std::string ReflectionRegistry::getClassName() const
     {
-        std::shared_ptr<const RegistryData> data = snapshot();
-        auto it = data->classNames.find(std::type_index(typeid(T)));
-        if (it == data->classNames.end())
-        {
-            throw ReflectionError(ReflectionErrorCode::ClassNotFound,
-                                  "类未注册");
-        }
-        return it->second;
+        return getClassNameByType(std::type_index(typeid(T)));
     }
 
     template <typename T>
     bool ReflectionRegistry::hasClassName() const
     {
-        std::shared_ptr<const RegistryData> data = snapshot();
-        return data->classNames.find(std::type_index(typeid(T))) !=
-               data->classNames.end();
+        return hasClassNameByType(std::type_index(typeid(T)));
     }
 
     template <typename T, typename ReturnType, typename... Args>
@@ -1097,17 +1068,8 @@ namespace Evently
     void ReflectionRegistry::registerField(const std::string &fieldName,
                                            FieldType T::*field)
     {
-        std::string className;
-        {
-            std::shared_ptr<const RegistryData> data = snapshot();
-            auto it = data->classNames.find(std::type_index(typeid(T)));
-            if (it == data->classNames.end())
-            {
-                throw ReflectionError(ReflectionErrorCode::ClassNotFound,
-                                      "类未注册，无法注册字段");
-            }
-            className = it->second;
-        }
+        const std::string className =
+            resolveClassNameByType(std::type_index(typeid(T)));
         addField(std::type_index(typeid(T)), className, fieldName,
                  std::shared_ptr<PropertySetterBase>(
                      new PropertySetter<T, FieldType>(field)));

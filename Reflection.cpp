@@ -6,29 +6,69 @@ namespace Evently
 {
     namespace
     {
+        struct ClassData
+        {
+            std::unordered_map<std::string,
+                               std::shared_ptr<PropertySetterBase>>
+                fields;
+            std::unordered_map<
+                std::string,
+                std::vector<std::shared_ptr<MethodInvokerBase>>>
+                methods;
+            std::set<std::string> methodNames;
+            std::vector<std::shared_ptr<ConstructorInvokerBase>> constructors;
+            std::shared_ptr<ObjectFactory> factory;
+        };
+
+        struct PluginScopeData
+        {
+            PluginScopeData()
+                : registry(nullptr), detached(false) {}
+
+            ReflectionRegistry *registry;
+            std::string moduleName;
+            std::set<std::string> classes;
+            bool detached;
+        };
+
         thread_local const ReflectionRegistry *tlsBatchOwner = nullptr;
-    }
+        thread_local PluginScopeData *tlsPluginScope = nullptr;
 
-    namespace detail
-    {
-        RegistrationQueue &RegistrationQueue::getInstance()
+        std::mutex &queueMutex()
         {
-            static RegistrationQueue instance;
-            return instance;
+            static std::mutex mutex;
+            return mutex;
         }
 
-        void RegistrationQueue::add(void (*function)())
+        std::vector<void (*)()> &queueFunctions()
         {
-            std::lock_guard<std::mutex> lock(mutex_);
-            functions_.push_back(function);
+            static std::vector<void (*)()> functions;
+            return functions;
         }
 
-        void RegistrationQueue::runAll()
+        void recordPluginClass(const std::string &className)
+        {
+            if (tlsPluginScope != nullptr)
+            {
+                tlsPluginScope->classes.insert(className);
+            }
+        }
+
+        std::shared_ptr<ClassData> mutableClass(detail::RegistryData &data,
+                                                const std::string &className);
+
+        void addQueueFunction(void (*function)())
+        {
+            std::lock_guard<std::mutex> lock(queueMutex());
+            queueFunctions().push_back(function);
+        }
+
+        void runQueue()
         {
             std::vector<void (*)()> functions;
             {
-                std::lock_guard<std::mutex> lock(mutex_);
-                functions.swap(functions_);
+                std::lock_guard<std::mutex> lock(queueMutex());
+                functions.swap(queueFunctions());
             }
             try
             {
@@ -39,11 +79,89 @@ namespace Evently
             }
             catch (...)
             {
-                std::lock_guard<std::mutex> lock(mutex_);
-                functions_.insert(functions_.end(), functions.begin(),
-                                  functions.end());
+                std::lock_guard<std::mutex> lock(queueMutex());
+                queueFunctions().insert(queueFunctions().end(),
+                                       functions.begin(), functions.end());
                 throw;
             }
+        }
+    }
+
+    struct detail::RegistryData
+    {
+        std::unordered_map<std::string, std::shared_ptr<ClassData>> classes;
+        std::unordered_map<std::type_index, std::string> primaryNames;
+        std::unordered_map<std::string, std::type_index> classNameOwners;
+    };
+
+    struct ReflectionRegistry::Impl
+    {
+        Impl() : data(new detail::RegistryData()), frozen(false) {}
+
+        std::shared_ptr<const detail::RegistryData> data;
+        std::shared_ptr<detail::RegistryData> batchData;
+        std::mutex writeMutex;
+        std::atomic<bool> frozen;
+    };
+
+    struct RegistrationBatch::Impl
+    {
+        Impl() : registry(nullptr), committed(false) {}
+
+        ReflectionRegistry *registry;
+        std::unique_lock<std::mutex> lock;
+        bool committed;
+    };
+
+    struct PluginRegistration::Impl
+    {
+        PluginScopeData scope;
+    };
+
+    namespace detail
+    {
+        void enqueueRegistration(void (*function)())
+        {
+            addQueueFunction(function);
+        }
+
+        void runRegistrationQueue()
+        {
+            runQueue();
+        }
+    }
+
+    namespace
+    {
+        std::shared_ptr<ClassData> findClass(const detail::RegistryData &data,
+                                             const std::string &className)
+        {
+            auto it = data.classes.find(className);
+            if (it == data.classes.end())
+            {
+                return std::shared_ptr<ClassData>();
+            }
+            return it->second;
+        }
+
+        std::shared_ptr<ClassData> mutableClass(detail::RegistryData &data,
+                                                const std::string &className)
+        {
+            auto it = data.classes.find(className);
+            if (it == data.classes.end())
+            {
+                std::shared_ptr<ClassData> created(new ClassData());
+                data.classes.insert(std::make_pair(className, created));
+                recordPluginClass(className);
+                return created;
+            }
+            if (it->second.use_count() == 1)
+            {
+                return it->second;
+            }
+            std::shared_ptr<ClassData> copy(new ClassData(*it->second));
+            it->second = copy;
+            return copy;
         }
     }
 
@@ -67,54 +185,60 @@ namespace Evently
     }
 
     ReflectionRegistry::ReflectionRegistry()
-        : data_(new RegistryData()), frozen_(false)
+        : impl_(new Impl())
     {
     }
 
-    std::shared_ptr<const ReflectionRegistry::RegistryData>
+    ReflectionRegistry::~ReflectionRegistry()
+    {
+        delete impl_;
+    }
+
+    std::shared_ptr<const detail::RegistryData>
     ReflectionRegistry::snapshot() const
     {
-        if (tlsBatchOwner == this && batchData_)
+        if (tlsBatchOwner == this && impl_->batchData)
         {
-            return std::shared_ptr<const RegistryData>(batchData_);
+            return std::shared_ptr<const detail::RegistryData>(impl_->batchData);
         }
-        return std::atomic_load(&data_);
+        return std::atomic_load(&impl_->data);
     }
 
-    std::shared_ptr<ReflectionRegistry::RegistryData>
+    std::shared_ptr<detail::RegistryData>
     ReflectionRegistry::copyData() const
     {
-        std::shared_ptr<const RegistryData> current = std::atomic_load(&data_);
-        return std::shared_ptr<RegistryData>(new RegistryData(*current));
+        std::shared_ptr<const detail::RegistryData> current =
+            std::atomic_load(&impl_->data);
+        return std::shared_ptr<detail::RegistryData>(new detail::RegistryData(*current));
     }
 
-    void ReflectionRegistry::publish(const std::shared_ptr<RegistryData> &data)
+    void ReflectionRegistry::publish(
+        const std::shared_ptr<detail::RegistryData> &data)
     {
-        std::atomic_store(&data_, std::shared_ptr<const RegistryData>(data));
+        std::atomic_store(&impl_->data,
+                          std::shared_ptr<const detail::RegistryData>(data));
     }
 
-    ReflectionRegistry::WriteContext ReflectionRegistry::beginWrite()
+    std::shared_ptr<detail::RegistryData>
+    ReflectionRegistry::beginWrite(std::unique_lock<std::mutex> &lock,
+                                   bool &batched)
     {
-        WriteContext context;
-        if (tlsBatchOwner == this && batchData_)
+        if (tlsBatchOwner == this && impl_->batchData)
         {
-            context.data = batchData_;
-            context.batched = true;
+            batched = true;
+            return impl_->batchData;
         }
-        else
-        {
-            context.lock = std::unique_lock<std::mutex>(writeMutex_);
-            context.data = copyData();
-            context.batched = false;
-        }
-        return context;
+        lock = std::unique_lock<std::mutex>(impl_->writeMutex);
+        batched = false;
+        return copyData();
     }
 
-    void ReflectionRegistry::endWrite(WriteContext &context)
+    void ReflectionRegistry::endWrite(
+        const std::shared_ptr<detail::RegistryData> &data, bool batched)
     {
-        if (!context.batched)
+        if (!batched)
         {
-            publish(context.data);
+            publish(data);
         }
     }
 
@@ -125,30 +249,30 @@ namespace Evently
             throw ReflectionError(ReflectionErrorCode::InvalidArgument,
                                   "不允许嵌套注册批处理");
         }
-        return std::unique_lock<std::mutex>(writeMutex_);
+        return std::unique_lock<std::mutex>(impl_->writeMutex);
     }
 
     void ReflectionRegistry::startBatch()
     {
-        if (batchData_)
+        if (impl_->batchData)
         {
             throw ReflectionError(ReflectionErrorCode::InvalidArgument,
                                   "注册批处理已经启动");
         }
-        batchData_ = copyData();
+        impl_->batchData = copyData();
         tlsBatchOwner = this;
     }
 
     void ReflectionRegistry::commitBatch()
     {
-        if (tlsBatchOwner != this || !batchData_)
+        if (tlsBatchOwner != this || !impl_->batchData)
         {
             throw ReflectionError(ReflectionErrorCode::InvalidArgument,
                                   "没有可提交的注册批处理");
         }
-        publish(batchData_);
+        publish(impl_->batchData);
         tlsBatchOwner = nullptr;
-        batchData_.reset();
+        impl_->batchData.reset();
     }
 
     void ReflectionRegistry::abortBatch()
@@ -157,43 +281,135 @@ namespace Evently
         {
             tlsBatchOwner = nullptr;
         }
-        batchData_.reset();
+        impl_->batchData.reset();
     }
 
     RegistrationBatch::RegistrationBatch(ReflectionRegistry &registry)
-        : registry_(&registry), lock_(registry.acquireBatchLock()),
-          committed_(false)
+        : impl_(new Impl())
     {
-        registry_->startBatch();
+        try
+        {
+            impl_->registry = &registry;
+            impl_->lock = registry.acquireBatchLock();
+            registry.startBatch();
+        }
+        catch (...)
+        {
+            delete impl_;
+            impl_ = nullptr;
+            throw;
+        }
     }
 
     RegistrationBatch::~RegistrationBatch()
     {
-        if (registry_ != nullptr && !committed_)
+        if (impl_ != nullptr && !impl_->committed)
         {
-            registry_->abortBatch();
+            impl_->registry->abortBatch();
         }
+        delete impl_;
     }
 
     void RegistrationBatch::commit()
     {
-        if (registry_ == nullptr)
+        if (impl_ == nullptr || impl_->committed)
         {
             return;
         }
-        registry_->commitBatch();
-        registry_ = nullptr;
-        committed_ = true;
+        impl_->registry->commitBatch();
+        impl_->committed = true;
     }
 
-    void ReflectionRegistry::ensureClass(RegistryData &data,
+    PluginRegistration::PluginRegistration(ReflectionRegistry &registry,
+                                           const std::string &moduleName)
+        : impl_(new Impl())
+    {
+        if (tlsPluginScope != nullptr)
+        {
+            delete impl_;
+            impl_ = nullptr;
+            throw ReflectionError(ReflectionErrorCode::InvalidArgument,
+                                  "不允许嵌套插件注册作用域");
+        }
+        try
+        {
+            impl_->scope.registry = &registry;
+            impl_->scope.moduleName = moduleName;
+            impl_->scope.detached = false;
+            tlsPluginScope = &impl_->scope;
+        }
+        catch (...)
+        {
+            delete impl_;
+            impl_ = nullptr;
+            throw;
+        }
+    }
+
+    PluginRegistration::~PluginRegistration()
+    {
+        if (impl_ == nullptr)
+        {
+            return;
+        }
+        if (tlsPluginScope == &impl_->scope)
+        {
+            tlsPluginScope = nullptr;
+        }
+        if (!impl_->scope.detached && impl_->scope.registry != nullptr)
+        {
+            for (std::set<std::string>::const_iterator it =
+                     impl_->scope.classes.begin();
+                 it != impl_->scope.classes.end(); ++it)
+            {
+                try
+                {
+                    impl_->scope.registry->unregisterClass(*it);
+                }
+                catch (...)
+                {
+                }
+            }
+        }
+        delete impl_;
+    }
+
+    void PluginRegistration::detach()
+    {
+        if (impl_ != nullptr)
+        {
+            impl_->scope.detached = true;
+        }
+    }
+
+    const std::string &PluginRegistration::moduleName() const
+    {
+        return impl_->scope.moduleName;
+    }
+
+    void ReflectionRegistry::ensureClass(detail::RegistryData &data,
                                          const std::string &className)
     {
-        data.classNamesSet.insert(className);
+        auto it = data.classes.find(className);
+        if (it != data.classes.end())
+        {
+            if (tlsPluginScope != nullptr &&
+                tlsPluginScope->classes.find(className) ==
+                    tlsPluginScope->classes.end())
+            {
+                throw ReflectionError(
+                    ReflectionErrorCode::InvalidArgument,
+                    "插件只能注册新类，不能修改已有类: " + className);
+            }
+            return;
+        }
+        data.classes.insert(
+            std::make_pair(className, std::shared_ptr<ClassData>(new ClassData())));
+        recordPluginClass(className);
     }
 
     void ReflectionRegistry::checkClassNameOwner(
-        RegistryData &data, const std::type_index &type,
+        detail::RegistryData &data, const std::type_index &type,
         const std::string &className)
     {
         auto owner = data.classNameOwners.find(className);
@@ -216,18 +432,20 @@ namespace Evently
             throw ReflectionError(ReflectionErrorCode::InvalidArgument,
                                   "类名不能为空");
         }
-        WriteContext context = beginWrite();
-        std::shared_ptr<RegistryData> next = context.data;
-        auto it = next->classNames.find(type);
-        if (it != next->classNames.end() && it->second != className)
+
+        std::unique_lock<std::mutex> lock;
+        bool batched = false;
+        std::shared_ptr<detail::RegistryData> next = beginWrite(lock, batched);
+        auto it = next->primaryNames.find(type);
+        if (it != next->primaryNames.end() && it->second != className)
         {
             throw ReflectionError(ReflectionErrorCode::DuplicateRegistration,
                                   "该类型已注册为其他类名");
         }
         checkClassNameOwner(*next, type, className);
-        next->classNames[type] = className;
+        next->primaryNames[type] = className;
         ensureClass(*next, className);
-        endWrite(context);
+        endWrite(next, batched);
     }
 
     void ReflectionRegistry::addField(
@@ -245,18 +463,20 @@ namespace Evently
             throw ReflectionError(ReflectionErrorCode::InvalidArgument,
                                   "字段设置器不能为空");
         }
-        WriteContext context = beginWrite();
-        std::shared_ptr<RegistryData> next = context.data;
+
+        std::unique_lock<std::mutex> lock;
+        bool batched = false;
+        std::shared_ptr<detail::RegistryData> next = beginWrite(lock, batched);
         checkClassNameOwner(*next, type, className);
-        auto key = std::make_pair(className, fieldName);
-        if (next->setters.find(key) != next->setters.end())
+        ensureClass(*next, className);
+        std::shared_ptr<ClassData> data = mutableClass(*next, className);
+        if (data->fields.find(fieldName) != data->fields.end())
         {
             throw ReflectionError(ReflectionErrorCode::DuplicateRegistration,
                                   "字段重复注册");
         }
-        next->setters[key] = setter;
-        ensureClass(*next, className);
-        endWrite(context);
+        data->fields[fieldName] = setter;
+        endWrite(next, batched);
     }
 
     void ReflectionRegistry::addMethod(
@@ -274,13 +494,17 @@ namespace Evently
             throw ReflectionError(ReflectionErrorCode::InvalidArgument,
                                   "方法调用器不能为空");
         }
-        WriteContext context = beginWrite();
-        std::shared_ptr<RegistryData> next = context.data;
+
+        std::unique_lock<std::mutex> lock;
+        bool batched = false;
+        std::shared_ptr<detail::RegistryData> next = beginWrite(lock, batched);
         checkClassNameOwner(*next, type, className);
-        auto key = std::make_pair(className, methodName);
+        ensureClass(*next, className);
+        std::shared_ptr<ClassData> data = mutableClass(*next, className);
         std::vector<std::shared_ptr<MethodInvokerBase>> &candidates =
-            next->methods[key];
-        const std::vector<std::type_index> parameters = invoker->parameterTypes();
+            data->methods[methodName];
+        const std::vector<std::type_index> parameters =
+            invoker->parameterTypes();
         for (std::size_t index = 0; index < candidates.size(); ++index)
         {
             const MethodInvokerBase &existing = *candidates[index];
@@ -295,9 +519,8 @@ namespace Evently
             }
         }
         candidates.push_back(invoker);
-        next->methodNames[className].insert(methodName);
-        ensureClass(*next, className);
-        endWrite(context);
+        data->methodNames.insert(methodName);
+        endWrite(next, batched);
     }
 
     void ReflectionRegistry::addConstructor(
@@ -314,16 +537,19 @@ namespace Evently
             throw ReflectionError(ReflectionErrorCode::InvalidArgument,
                                   "构造函数不能为空");
         }
-        WriteContext context = beginWrite();
-        std::shared_ptr<RegistryData> next = context.data;
+
+        std::unique_lock<std::mutex> lock;
+        bool batched = false;
+        std::shared_ptr<detail::RegistryData> next = beginWrite(lock, batched);
         checkClassNameOwner(*next, type, className);
-        std::vector<std::shared_ptr<ConstructorInvokerBase>> &candidates =
-            next->constructors[className];
+        ensureClass(*next, className);
+        std::shared_ptr<ClassData> data = mutableClass(*next, className);
         const std::vector<std::type_index> parameters =
             constructor->parameterTypes();
-        for (std::size_t index = 0; index < candidates.size(); ++index)
+        for (std::size_t index = 0; index < data->constructors.size(); ++index)
         {
-            const ConstructorInvokerBase &existing = *candidates[index];
+            const ConstructorInvokerBase &existing =
+                *data->constructors[index];
             if (existing.arity() == constructor->arity() &&
                 existing.parameterTypes() == parameters)
             {
@@ -331,9 +557,8 @@ namespace Evently
                                       "构造函数重复注册");
             }
         }
-        candidates.push_back(constructor);
-        ensureClass(*next, className);
-        endWrite(context);
+        data->constructors.push_back(constructor);
+        endWrite(next, batched);
     }
 
     void ReflectionRegistry::addFactory(
@@ -350,17 +575,20 @@ namespace Evently
             throw ReflectionError(ReflectionErrorCode::InvalidArgument,
                                   "对象工厂不能为空");
         }
-        WriteContext context = beginWrite();
-        std::shared_ptr<RegistryData> next = context.data;
+
+        std::unique_lock<std::mutex> lock;
+        bool batched = false;
+        std::shared_ptr<detail::RegistryData> next = beginWrite(lock, batched);
         checkClassNameOwner(*next, type, className);
-        if (next->factories.find(className) != next->factories.end())
+        ensureClass(*next, className);
+        std::shared_ptr<ClassData> data = mutableClass(*next, className);
+        if (data->factory)
         {
             throw ReflectionError(ReflectionErrorCode::DuplicateRegistration,
                                   "类工厂重复注册");
         }
-        next->factories[className] = factory;
-        ensureClass(*next, className);
-        endWrite(context);
+        data->factory = factory;
+        endWrite(next, batched);
     }
 
     bool ReflectionRegistry::unregisterClass(const std::string &className)
@@ -370,122 +598,135 @@ namespace Evently
             return false;
         }
 
-        WriteContext context = beginWrite();
-        std::shared_ptr<RegistryData> next = context.data;
-        if (next->classNamesSet.find(className) == next->classNamesSet.end())
+        std::unique_lock<std::mutex> lock;
+        bool batched = false;
+        std::shared_ptr<detail::RegistryData> next = beginWrite(lock, batched);
+        if (next->classes.find(className) == next->classes.end())
         {
             return false;
         }
 
-        for (auto it = next->setters.begin(); it != next->setters.end();)
-        {
-            if (it->first.first == className)
-            {
-                it = next->setters.erase(it);
-            }
-            else
-            {
-                ++it;
-            }
-        }
-        for (auto it = next->methods.begin(); it != next->methods.end();)
-        {
-            if (it->first.first == className)
-            {
-                it = next->methods.erase(it);
-            }
-            else
-            {
-                ++it;
-            }
-        }
-        next->constructors.erase(className);
-        next->factories.erase(className);
-        next->methodNames.erase(className);
+        next->classes.erase(className);
         next->classNameOwners.erase(className);
-        next->classNamesSet.erase(className);
-        for (auto it = next->classNames.begin(); it != next->classNames.end();)
+        for (auto it = next->primaryNames.begin();
+             it != next->primaryNames.end();)
         {
             if (it->second == className)
             {
-                it = next->classNames.erase(it);
+                it = next->primaryNames.erase(it);
             }
             else
             {
                 ++it;
             }
         }
-
-        endWrite(context);
+        endWrite(next, batched);
         return true;
     }
 
     void ReflectionRegistry::clear()
     {
-        WriteContext context = beginWrite();
-        *context.data = RegistryData();
-        endWrite(context);
-        frozen_.store(false, std::memory_order_release);
+        std::unique_lock<std::mutex> lock;
+        bool batched = false;
+        std::shared_ptr<detail::RegistryData> next = beginWrite(lock, batched);
+        *next = detail::RegistryData();
+        endWrite(next, batched);
+        impl_->frozen.store(false, std::memory_order_release);
     }
 
     void ReflectionRegistry::registerAll()
     {
         RegistrationBatch batch(*this);
-        detail::RegistrationQueue::getInstance().runAll();
+        detail::runRegistrationQueue();
         batch.commit();
     }
 
     void ReflectionRegistry::freeze()
     {
-        frozen_.store(true, std::memory_order_release);
+        impl_->frozen.store(true, std::memory_order_release);
     }
 
     bool ReflectionRegistry::isFrozen() const noexcept
     {
-        return frozen_.load(std::memory_order_acquire);
+        return impl_->frozen.load(std::memory_order_acquire);
+    }
+
+    std::string ReflectionRegistry::getClassNameByType(
+        const std::type_index &type) const
+    {
+        std::shared_ptr<const detail::RegistryData> data = snapshot();
+        auto it = data->primaryNames.find(type);
+        if (it == data->primaryNames.end())
+        {
+            throw ReflectionError(ReflectionErrorCode::ClassNotFound,
+                                  "类未注册");
+        }
+        return it->second;
+    }
+
+    bool ReflectionRegistry::hasClassNameByType(
+        const std::type_index &type) const
+    {
+        std::shared_ptr<const detail::RegistryData> data = snapshot();
+        return data->primaryNames.find(type) != data->primaryNames.end();
+    }
+
+    std::string ReflectionRegistry::resolveClassNameByType(
+        const std::type_index &type) const
+    {
+        std::shared_ptr<const detail::RegistryData> data = snapshot();
+        auto it = data->primaryNames.find(type);
+        if (it == data->primaryNames.end())
+        {
+            throw ReflectionError(ReflectionErrorCode::ClassNotFound,
+                                  "类未注册，无法注册字段");
+        }
+        return it->second;
     }
 
     bool ReflectionRegistry::hasClass(const std::string &className) const
     {
-        std::shared_ptr<const RegistryData> data = snapshot();
-        return data->classNamesSet.find(className) != data->classNamesSet.end();
+        std::shared_ptr<const detail::RegistryData> data = snapshot();
+        return data->classes.find(className) != data->classes.end();
     }
 
     bool ReflectionRegistry::hasField(const std::string &className,
                                       const std::string &fieldName) const
     {
-        std::shared_ptr<const RegistryData> data = snapshot();
-        if (data->classNamesSet.find(className) == data->classNamesSet.end())
+        std::shared_ptr<const detail::RegistryData> data = snapshot();
+        std::shared_ptr<ClassData> classData = findClass(*data, className);
+        if (!classData)
         {
             return false;
         }
-        return data->setters.find(std::make_pair(className, fieldName)) !=
-               data->setters.end();
+        return classData->fields.find(fieldName) != classData->fields.end();
     }
 
     bool ReflectionRegistry::hasMethod(const std::string &className,
                                        const std::string &methodName) const
     {
-        std::shared_ptr<const RegistryData> data = snapshot();
-        if (data->classNamesSet.find(className) == data->classNamesSet.end())
+        std::shared_ptr<const detail::RegistryData> data = snapshot();
+        std::shared_ptr<ClassData> classData = findClass(*data, className);
+        if (!classData)
         {
             return false;
         }
-        auto it = data->methods.find(std::make_pair(className, methodName));
-        return it != data->methods.end() && !it->second.empty();
+        auto it = classData->methods.find(methodName);
+        return it != classData->methods.end() && !it->second.empty();
     }
 
     bool ReflectionRegistry::isFieldWritable(const std::string &className,
                                              const std::string &fieldName) const
     {
-        std::shared_ptr<const RegistryData> data = snapshot();
-        if (data->classNamesSet.find(className) == data->classNamesSet.end())
+        std::shared_ptr<const detail::RegistryData> data = snapshot();
+        std::shared_ptr<ClassData> classData = findClass(*data, className);
+        if (!classData)
         {
             throw ReflectionError(ReflectionErrorCode::ClassNotFound,
                                   "类未注册: " + className);
         }
-        auto it = data->setters.find(std::make_pair(className, fieldName));
-        if (it == data->setters.end())
+        auto it = classData->fields.find(fieldName);
+        if (it == classData->fields.end())
         {
             throw ReflectionError(ReflectionErrorCode::FieldNotFound,
                                   "字段未注册: " + className + "::" + fieldName);
@@ -496,30 +737,24 @@ namespace Evently
     ObjectHandle ReflectionRegistry::createInstance(
         const std::string &className) const
     {
-        std::shared_ptr<const RegistryData> data = snapshot();
-        if (data->classNamesSet.find(className) == data->classNamesSet.end())
+        std::shared_ptr<const detail::RegistryData> data = snapshot();
+        std::shared_ptr<ClassData> classData = findClass(*data, className);
+        if (!classData)
         {
             throw ReflectionError(ReflectionErrorCode::ClassNotFound,
                                   "类未注册: " + className);
         }
-
-        auto factoryIt = data->factories.find(className);
-        if (factoryIt != data->factories.end())
+        if (classData->factory)
         {
-            return factoryIt->second->create();
+            return classData->factory->create();
         }
-
-        auto constructorIt = data->constructors.find(className);
-        if (constructorIt != data->constructors.end())
+        for (std::size_t index = 0; index < classData->constructors.size();
+             ++index)
         {
-            for (std::size_t index = 0; index < constructorIt->second.size();
-                 ++index)
+            if (classData->constructors[index]->arity() == 0)
             {
-                if (constructorIt->second[index]->arity() == 0)
-                {
-                    return constructorIt->second[index]->construct(
-                        std::vector<Any>());
-                }
+                return classData->constructors[index]->construct(
+                    std::vector<Any>());
             }
         }
         throw ReflectionError(ReflectionErrorCode::ConstructorNotFound,
@@ -529,14 +764,14 @@ namespace Evently
     ObjectHandle ReflectionRegistry::createInstance(
         const std::string &className, const std::vector<Any> &args) const
     {
-        std::shared_ptr<const RegistryData> data = snapshot();
-        if (data->classNamesSet.find(className) == data->classNamesSet.end())
+        std::shared_ptr<const detail::RegistryData> data = snapshot();
+        std::shared_ptr<ClassData> classData = findClass(*data, className);
+        if (!classData)
         {
             throw ReflectionError(ReflectionErrorCode::ClassNotFound,
                                   "类未注册: " + className);
         }
-        auto it = data->constructors.find(className);
-        if (it == data->constructors.end())
+        if (classData->constructors.empty())
         {
             throw ReflectionError(ReflectionErrorCode::ConstructorNotFound,
                                   "未找到构造函数: " + className);
@@ -545,15 +780,16 @@ namespace Evently
         std::shared_ptr<ConstructorInvokerBase> selected;
         bool arityMatched = false;
         bool typeMatched = false;
-        for (std::size_t index = 0; index < it->second.size(); ++index)
+        for (std::size_t index = 0; index < classData->constructors.size();
+             ++index)
         {
-            const ConstructorInvokerBase &candidate = *it->second[index];
+            const ConstructorInvokerBase &candidate =
+                *classData->constructors[index];
             if (candidate.arity() != args.size())
             {
                 continue;
             }
             arityMatched = true;
-
             const std::vector<std::type_index> parameters =
                 candidate.parameterTypes();
             bool matches = true;
@@ -576,7 +812,7 @@ namespace Evently
                 throw ReflectionError(ReflectionErrorCode::AmbiguousConstructor,
                                       "构造函数重载不明确: " + className);
             }
-            selected = it->second[index];
+            selected = classData->constructors[index];
         }
 
         if (!selected)
@@ -600,14 +836,15 @@ namespace Evently
     std::shared_ptr<PropertySetterBase> ReflectionRegistry::getSetter(
         const std::string &className, const std::string &fieldName) const
     {
-        std::shared_ptr<const RegistryData> data = snapshot();
-        if (data->classNamesSet.find(className) == data->classNamesSet.end())
+        std::shared_ptr<const detail::RegistryData> data = snapshot();
+        std::shared_ptr<ClassData> classData = findClass(*data, className);
+        if (!classData)
         {
             throw ReflectionError(ReflectionErrorCode::ClassNotFound,
                                   "类未注册: " + className);
         }
-        auto it = data->setters.find(std::make_pair(className, fieldName));
-        if (it == data->setters.end())
+        auto it = classData->fields.find(fieldName);
+        if (it == classData->fields.end())
         {
             throw ReflectionError(ReflectionErrorCode::FieldNotFound,
                                   "字段未注册: " + className + "::" + fieldName);
@@ -623,8 +860,9 @@ namespace Evently
     std::unordered_map<std::string, Any> ReflectionRegistry::getAllValues(
         const std::string &className, const void *instance) const
     {
-        std::shared_ptr<const RegistryData> data = snapshot();
-        if (data->classNamesSet.find(className) == data->classNamesSet.end())
+        std::shared_ptr<const detail::RegistryData> data = snapshot();
+        std::shared_ptr<ClassData> classData = findClass(*data, className);
+        if (!classData)
         {
             throw ReflectionError(ReflectionErrorCode::ClassNotFound,
                                   "类未注册: " + className);
@@ -635,20 +873,11 @@ namespace Evently
                                   "实例指针不能为空");
         }
 
-        std::vector<std::pair<std::string, std::shared_ptr<PropertySetterBase>>>
-            fields;
-        for (auto it = data->setters.begin(); it != data->setters.end(); ++it)
-        {
-            if (it->first.first == className)
-            {
-                fields.push_back(std::make_pair(it->first.second, it->second));
-            }
-        }
-
         std::unordered_map<std::string, Any> values;
-        for (std::size_t index = 0; index < fields.size(); ++index)
+        for (auto it = classData->fields.begin(); it != classData->fields.end();
+             ++it)
         {
-            values[fields[index].first] = fields[index].second->get(instance);
+            values[it->first] = it->second->get(instance);
         }
         return values;
     }
@@ -657,8 +886,9 @@ namespace Evently
                                       const std::string &fieldName,
                                       const void *instance) const
     {
-        std::shared_ptr<const RegistryData> data = snapshot();
-        if (data->classNamesSet.find(className) == data->classNamesSet.end())
+        std::shared_ptr<const detail::RegistryData> data = snapshot();
+        std::shared_ptr<ClassData> classData = findClass(*data, className);
+        if (!classData)
         {
             throw ReflectionError(ReflectionErrorCode::ClassNotFound,
                                   "类未注册: " + className);
@@ -668,8 +898,8 @@ namespace Evently
             throw ReflectionError(ReflectionErrorCode::InvalidInstance,
                                   "实例指针不能为空");
         }
-        auto it = data->setters.find(std::make_pair(className, fieldName));
-        if (it == data->setters.end())
+        auto it = classData->fields.find(fieldName);
+        if (it == classData->fields.end())
         {
             throw ReflectionError(ReflectionErrorCode::FieldNotFound,
                                   "字段未注册: " + className + "::" + fieldName);
@@ -731,14 +961,15 @@ namespace Evently
                                   "实例指针不能为空");
         }
 
-        std::shared_ptr<const RegistryData> data = snapshot();
-        if (data->classNamesSet.find(className) == data->classNamesSet.end())
+        std::shared_ptr<const detail::RegistryData> data = snapshot();
+        std::shared_ptr<ClassData> classData = findClass(*data, className);
+        if (!classData)
         {
             throw ReflectionError(ReflectionErrorCode::ClassNotFound,
                                   "类未注册: " + className);
         }
-        auto it = data->methods.find(std::make_pair(className, methodName));
-        if (it == data->methods.end())
+        auto it = classData->methods.find(methodName);
+        if (it == classData->methods.end())
         {
             throw ReflectionError(ReflectionErrorCode::MethodNotFound,
                                   "方法未注册: " + className + "::" + methodName);
@@ -931,14 +1162,15 @@ namespace Evently
         const std::string &className, const std::string &functionName,
         const std::vector<Any> &args) const
     {
-        std::shared_ptr<const RegistryData> data = snapshot();
-        if (data->classNamesSet.find(className) == data->classNamesSet.end())
+        std::shared_ptr<const detail::RegistryData> data = snapshot();
+        std::shared_ptr<ClassData> classData = findClass(*data, className);
+        if (!classData)
         {
             throw ReflectionError(ReflectionErrorCode::ClassNotFound,
                                   "类未注册: " + className);
         }
-        auto it = data->methods.find(std::make_pair(className, functionName));
-        if (it == data->methods.end())
+        auto it = classData->methods.find(functionName);
+        if (it == classData->methods.end())
         {
             throw ReflectionError(ReflectionErrorCode::MethodNotFound,
                                   "函数未注册: " + className + "::" +
@@ -1034,38 +1266,32 @@ namespace Evently
     std::set<std::string> ReflectionRegistry::getMethodNames(
         const std::string &className) const
     {
-        std::shared_ptr<const RegistryData> data = snapshot();
-        if (data->classNamesSet.find(className) == data->classNamesSet.end())
+        std::shared_ptr<const detail::RegistryData> data = snapshot();
+        std::shared_ptr<ClassData> classData = findClass(*data, className);
+        if (!classData)
         {
             throw ReflectionError(ReflectionErrorCode::ClassNotFound,
                                   "类未注册: " + className);
         }
-        auto it = data->methodNames.find(className);
-        if (it != data->methodNames.end())
-        {
-            return it->second;
-        }
-        return std::set<std::string>();
+        return classData->methodNames;
     }
 
     std::vector<FieldInfo> ReflectionRegistry::getFields(
         const std::string &className) const
     {
-        std::shared_ptr<const RegistryData> data = snapshot();
-        if (data->classNamesSet.find(className) == data->classNamesSet.end())
+        std::shared_ptr<const detail::RegistryData> data = snapshot();
+        std::shared_ptr<ClassData> classData = findClass(*data, className);
+        if (!classData)
         {
             throw ReflectionError(ReflectionErrorCode::ClassNotFound,
                                   "类未注册: " + className);
         }
         std::vector<FieldInfo> fields;
-        for (auto it = data->setters.begin(); it != data->setters.end(); ++it)
+        for (auto it = classData->fields.begin(); it != classData->fields.end();
+             ++it)
         {
-            if (it->first.first == className)
-            {
-                fields.push_back(FieldInfo(it->first.second,
-                                           it->second->type(),
-                                           it->second->isWritable()));
-            }
+            fields.push_back(FieldInfo(it->first, it->second->type(),
+                                       it->second->isWritable()));
         }
         return fields;
     }
@@ -1073,23 +1299,21 @@ namespace Evently
     std::vector<MethodInfo> ReflectionRegistry::getMethods(
         const std::string &className) const
     {
-        std::shared_ptr<const RegistryData> data = snapshot();
-        if (data->classNamesSet.find(className) == data->classNamesSet.end())
+        std::shared_ptr<const detail::RegistryData> data = snapshot();
+        std::shared_ptr<ClassData> classData = findClass(*data, className);
+        if (!classData)
         {
             throw ReflectionError(ReflectionErrorCode::ClassNotFound,
                                   "类未注册: " + className);
         }
         std::vector<MethodInfo> methods;
-        for (auto it = data->methods.begin(); it != data->methods.end(); ++it)
+        for (auto it = classData->methods.begin();
+             it != classData->methods.end(); ++it)
         {
-            if (it->first.first != className)
-            {
-                continue;
-            }
             for (std::size_t index = 0; index < it->second.size(); ++index)
             {
                 const MethodInvokerBase &invoker = *it->second[index];
-                methods.push_back(MethodInfo(it->first.second,
+                methods.push_back(MethodInfo(it->first,
                                              invoker.arity(),
                                              invoker.parameterTypes(),
                                              invoker.returnType(),
@@ -1104,62 +1328,62 @@ namespace Evently
     std::vector<ConstructorInfo> ReflectionRegistry::getConstructors(
         const std::string &className) const
     {
-        std::shared_ptr<const RegistryData> data = snapshot();
-        if (data->classNamesSet.find(className) == data->classNamesSet.end())
+        std::shared_ptr<const detail::RegistryData> data = snapshot();
+        std::shared_ptr<ClassData> classData = findClass(*data, className);
+        if (!classData)
         {
             throw ReflectionError(ReflectionErrorCode::ClassNotFound,
                                   "类未注册: " + className);
         }
         std::vector<ConstructorInfo> constructors;
-        auto it = data->constructors.find(className);
-        if (it != data->constructors.end())
+        for (std::size_t index = 0; index < classData->constructors.size();
+             ++index)
         {
-            for (std::size_t index = 0; index < it->second.size(); ++index)
-            {
-                const ConstructorInvokerBase &constructor = *it->second[index];
-                constructors.push_back(ConstructorInfo(
-                    constructor.arity(), constructor.parameterTypes()));
-            }
+            const ConstructorInvokerBase &constructor =
+                *classData->constructors[index];
+            constructors.push_back(ConstructorInfo(
+                constructor.arity(), constructor.parameterTypes()));
         }
         return constructors;
     }
 
     std::vector<std::string> ReflectionRegistry::getClassNames() const
     {
-        std::shared_ptr<const RegistryData> data = snapshot();
-        return std::vector<std::string>(data->classNamesSet.begin(),
-                                        data->classNamesSet.end());
+        std::shared_ptr<const detail::RegistryData> data = snapshot();
+        std::vector<std::string> names;
+        names.reserve(data->classes.size());
+        for (auto it = data->classes.begin(); it != data->classes.end(); ++it)
+        {
+            names.push_back(it->first);
+        }
+        return names;
     }
 
-    ClassInfo ReflectionRegistry::getClassInfo(const std::string &className) const
+    ClassInfo ReflectionRegistry::getClassInfo(
+        const std::string &className) const
     {
-        std::shared_ptr<const RegistryData> data = snapshot();
-        if (data->classNamesSet.find(className) == data->classNamesSet.end())
+        std::shared_ptr<const detail::RegistryData> data = snapshot();
+        std::shared_ptr<ClassData> classData = findClass(*data, className);
+        if (!classData)
         {
             throw ReflectionError(ReflectionErrorCode::ClassNotFound,
                                   "类未注册: " + className);
         }
 
         ClassInfo info(className);
-        for (auto it = data->setters.begin(); it != data->setters.end(); ++it)
+        for (auto it = classData->fields.begin(); it != classData->fields.end();
+             ++it)
         {
-            if (it->first.first == className)
-            {
-                info.fields.push_back(FieldInfo(it->first.second,
-                                                it->second->type(),
-                                                it->second->isWritable()));
-            }
+            info.fields.push_back(FieldInfo(it->first, it->second->type(),
+                                            it->second->isWritable()));
         }
-        for (auto it = data->methods.begin(); it != data->methods.end(); ++it)
+        for (auto it = classData->methods.begin();
+             it != classData->methods.end(); ++it)
         {
-            if (it->first.first != className)
-            {
-                continue;
-            }
             for (std::size_t index = 0; index < it->second.size(); ++index)
             {
                 const MethodInvokerBase &invoker = *it->second[index];
-                info.methods.push_back(MethodInfo(it->first.second,
+                info.methods.push_back(MethodInfo(it->first,
                                                   invoker.arity(),
                                                   invoker.parameterTypes(),
                                                   invoker.returnType(),
@@ -1168,17 +1392,13 @@ namespace Evently
                                                   invoker.refQualifier()));
             }
         }
-        auto constructorIt = data->constructors.find(className);
-        if (constructorIt != data->constructors.end())
+        for (std::size_t index = 0; index < classData->constructors.size();
+             ++index)
         {
-            for (std::size_t index = 0; index < constructorIt->second.size();
-                 ++index)
-            {
-                const ConstructorInvokerBase &constructor =
-                    *constructorIt->second[index];
-                info.constructors.push_back(ConstructorInfo(
-                    constructor.arity(), constructor.parameterTypes()));
-            }
+            const ConstructorInvokerBase &constructor =
+                *classData->constructors[index];
+            info.constructors.push_back(ConstructorInfo(
+                constructor.arity(), constructor.parameterTypes()));
         }
         return info;
     }

@@ -220,6 +220,12 @@ namespace
         int value_ = 0;
     };
 
+    class PluginObject
+    {
+    public:
+        int value_ = 0;
+    };
+
     EVENTLY_REGISTER_CLASS(AutoObject, "AutoObject")
     {
         Evently::ClassRegistration<AutoObject> registration("AutoObject");
@@ -1025,6 +1031,55 @@ namespace
         CHECK(!registry.hasClass("AliasB"));
     }
 
+    void testPluginLifecycle()
+    {
+        ReflectionRegistry &registry = ReflectionRegistry::getInstance();
+        CHECK(!registry.hasClass("PluginObject"));
+
+        {
+            Evently::PluginRegistration plugin(registry, "TestPlugin");
+            CHECK(plugin.moduleName() == "TestPlugin");
+            {
+                Evently::RegistrationBatch batch(registry);
+                registry.registerClassName<PluginObject>("PluginObject");
+                registry.registerField<PluginObject>("PluginObject", "value",
+                                                     &PluginObject::value_);
+                registry.registerConstructor<PluginObject>("PluginObject");
+                batch.commit();
+            }
+            CHECK(registry.hasClass("PluginObject"));
+            CHECK(registry.hasField("PluginObject", "value"));
+            CHECK_ERROR(ReflectionErrorCode::InvalidArgument,
+                        (registry.registerField<TestObject>(
+                            "TestObject", "pluginField",
+                            &TestObject::value_)));
+        }
+        CHECK(!registry.hasClass("PluginObject"));
+
+        {
+            Evently::PluginRegistration plugin(registry, "DetachedPlugin");
+            registry.registerClassName<PluginObject>("PluginDetached");
+            registry.registerField<PluginObject>("PluginDetached", "value",
+                                                 &PluginObject::value_);
+            plugin.detach();
+        }
+        CHECK(registry.hasClass("PluginDetached"));
+        CHECK(registry.unregisterClass("PluginDetached"));
+
+        bool nestedCaught = false;
+        try
+        {
+            Evently::PluginRegistration outer(registry, "Outer");
+            Evently::PluginRegistration inner(registry, "Inner");
+        }
+        catch (const ReflectionError &error)
+        {
+            nestedCaught =
+                error.code() == ReflectionErrorCode::InvalidArgument;
+        }
+        CHECK(nestedCaught);
+    }
+
     void testClear()
     {
         ReflectionRegistry &registry = ReflectionRegistry::getInstance();
@@ -1235,6 +1290,7 @@ namespace
         {"AutoRegistration", testAutoRegistration},
         {"RegistrationBatch", testRegistrationBatch},
         {"Lifecycle", testLifecycle},
+        {"PluginLifecycle", testPluginLifecycle},
         {"RegistrationErrors", testRegistrationErrors},
         {"ThreadSafety", testThreadSafety},
         {"Clear", testClear}};

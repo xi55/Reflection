@@ -35,6 +35,8 @@
 - ✅ `registerAll()` + `EVENTLY_REGISTER_CLASS` 自动注册队列
 - ✅ `RegistrationBatch` 批量 COW 事务
 - ✅ `unregisterClass` / `clear` 生命周期 API
+- ✅ Pimpl/ABI 稳定与按类分片 COW
+- ✅ `PluginRegistration` 插件注册作用域
 - ✅ 基于字段元数据的 JSON 序列化示例
 - ✅ `Any` 小对象内联存储、move、`has_value`/`reset`/`emplace`
 - ✅ const 实例只能调用 const 方法
@@ -87,12 +89,21 @@ Reflection/
 - ✅ 类型安全 `ObjectHandle`、统一错误码与元数据查询
 - ✅ 方法重载、const 实例调用、COW 并发读写
 - ✅ `noexcept`、完整 ref-qualified、静态/自由函数、运行期构造函数
-- ✅ 自动注册队列、批量事务、生命周期 API、JSON 示例、`Any` 小对象优化
-- ✅ 基准测试、install/export、CI 与 250+ 项断言的回归测试
+- ✅ 自动注册、批量事务、生命周期、插件作用域、按类分片、Pimpl ABI
+- ✅ JSON 示例、`Any` 小对象优化、基准、install/export、CI 与 280+ 项断言
 
 ---
 
 ## 📅 更新日志
+
+### v4.2.0 - 分片、Pimpl 与插件生命周期 (2026-10-22)
+
+- 注册中心改为 Pimpl，隐藏内部 STL/mutex 状态，移除 C4251 抑制
+- COW 按类分片：单类写入和元数据查询只处理该类
+- 新增 `PluginRegistration`：自动卸载作用域内注册的类，支持 `detach()`
+- 批量注册复用类分片，`RegistrationBatch` 成本进一步降低
+- 新增插件生命周期测试与分片基准
+- 精确类型匹配保持不变
 
 ### v4.1.0 - 批量 COW 与生命周期 (2026-10-22)
 
@@ -230,9 +241,10 @@ Reflection/
 
 当前版本仍有以下边界：
 
-1. **COW 快照边界**：
-   - 单条注册仍会复制注册表快照；批量注册通过 `RegistrationBatch` 摊薄成本
-   - 已提供 `unregisterClass` / `clear`，但插件 DLL 卸载后的代码生命周期仍需调用方保证
+1. **COW 与插件生命周期边界**：
+   - 按类分片后，单条注册复制外层类 map + 目标 `ClassData`；批量注册进一步复用类副本
+   - `PluginRegistration` 自动卸载作用域内新类，但外部持有的 `ObjectHandle`/setter/`Any` 必须在插件卸载前销毁
+   - Pimpl 稳定类布局，但公开签名仍含 `std::string`/`shared_ptr`/`vector`，不承诺跨工具链 ABI
    - `getSetter` 返回 `shared_ptr`，调用方可以安全持有
 
 2. **方法/构造解析使用精确类型匹配**：
@@ -252,11 +264,10 @@ Reflection/
 
 ## 🚀 后续方向
 
-### 🎯 v4.2.0 - 性能、ABI 与运维
-- [ ] COW 按类分片，降低大注册表单次写入成本
-- [ ] Pimpl/ABI 稳定与共享库跨版本兼容
-- [ ] 共享库安装包消费方自动化测试
-- [ ] 插件热加载/卸载生命周期策略
+### 🎯 v4.3.0 - 大规模与分发
+- [ ] persistent/immutable 外层类索引，降低大规模类表的写入成本
+- [ ] 完整 C ABI 与跨工具链二进制兼容（如确有需求）
+- [ ] 插件句柄/对象生命周期追踪与更严格卸载策略
 - [ ] 性能基准与文档持续完善
 
 ---
@@ -358,7 +369,9 @@ ctest --test-dir build\msvc-cxx14 -R reflection_ --output-on-failure
 
 Linux 下对应运行 `build/gcc-cxx11/ReflectionTests --test Any`。
 
-测试组：`Any`、`Fields`、`Methods`、`Factory`、`Metadata`、`Functions`、`Qualifiers`、`Constructors`、`AutoRegistration`、`RegistrationBatch`、`Lifecycle`、`RegistrationErrors`、`ThreadSafety`、`Clear`，共 250+ 项断言（C++17 额外包含 `noexcept` 用例）。CTest 将核心测试和会执行并发读写的 `ThreadSafety` 分开进程运行，并运行 `JsonSerializationExample`。
+测试组：`Any`、`Fields`、`Methods`、`Factory`、`Metadata`、`Functions`、`Qualifiers`、`Constructors`、`AutoRegistration`、`RegistrationBatch`、`Lifecycle`、`PluginLifecycle`、`RegistrationErrors`、`ThreadSafety`、`Clear`，共 280+ 项断言（C++17 额外包含 `noexcept` 用例）。CTest 将核心测试和会执行并发读写的 `ThreadSafety` 分开进程运行，并运行 `JsonSerializationExample`。
+
+v4.2 分片基准（WSL GCC 17 Release，100 个类）：逐条注册约 `1.14 ms`，批量注册约 `0.131 ms`，查询约 `0.023 ms`；相对 v4.1 的全局快照有显著下降。
 
 ---
 
@@ -480,6 +493,22 @@ int main() {
 registry.unregisterClass("Person");
 registry.clear();
 ```
+
+插件作用域：
+
+```cpp
+{
+    Evently::PluginRegistration plugin(registry, "MyPlugin");
+    Evently::RegistrationBatch batch(registry);
+    registry.registerClassName<PluginType>("PluginType");
+    registry.registerField<PluginType>("PluginType", "value", &PluginType::value);
+    batch.commit();
+    // plugin 析构时自动 unregisterClass("PluginType")
+    // plugin.detach(); // 如需保留注册，由调用方保证插件代码生命周期
+}
+```
+
+宿主必须在销毁 `PluginRegistration` 和卸载插件 DLL 前停止插件线程，并销毁所有引用插件类型的 `ObjectHandle`、setter `shared_ptr` 和 `Any`。
 
 对 `&&` / `const &&` 成员函数使用 `RvalueInstance`：
 

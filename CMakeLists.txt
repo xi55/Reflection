@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(EventlyReflection VERSION 4.1.0 LANGUAGES CXX)
+project(EventlyReflection VERSION 4.2.0 LANGUAGES CXX)
 
 if(MSVC AND NOT BUILD_SHARED_LIBS)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" CACHE STRING "MSVC runtime library")
@@ -23,9 +23,6 @@ function(evently_target_defaults target)
     )
     if(MSVC)
         target_compile_options(${target} PRIVATE /W4 /utf-8 /Zc:__cplusplus)
-        if(BUILD_SHARED_LIBS)
-            target_compile_options(${target} PRIVATE /wd4251)
-        endif()
     else()
         target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
     endif()
