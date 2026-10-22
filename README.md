@@ -15,7 +15,7 @@
 - `ObjectHandle`：基于 `std::shared_ptr` 的类型安全对象句柄
 - 可变参数模板 + 自定义 `index_sequence`：泛型成员方法调用器
 - 类、字段、方法、对象工厂注册，以及字段/方法元数据
-- COW 快照注册中心：读操作无锁，支持运行期动态注册
+- 按类分片 COW 注册中心：读操作无锁，支持运行期动态注册
 
 > 类似于 Java/C# 中的反射系统，是构建脚本系统、插件系统、序列化框架、可视化编辑器等的基础组件。
 
@@ -35,12 +35,12 @@
 - ✅ `registerAll()` + `EVENTLY_REGISTER_CLASS` 自动注册队列
 - ✅ `RegistrationBatch` 批量 COW 事务
 - ✅ `unregisterClass` / `clear` 生命周期 API
-- ✅ Pimpl/ABI 稳定与按类分片 COW
+- ✅ 注册中心 Pimpl 实现隐藏与按类分片 COW（不承诺跨工具链 ABI）
 - ✅ `PluginRegistration` 插件注册作用域
 - ✅ 基于字段元数据的 JSON 序列化示例
 - ✅ `Any` 小对象内联存储、move、`has_value`/`reset`/`emplace`
 - ✅ const 实例只能调用 const 方法
-- ✅ COW 快照：`freeze()` 后仍可动态注册，读操作无锁
+- ✅ 按类分片 COW 快照：`freeze()` 后仍可动态注册，读操作无锁
 - ✅ 静态库/共享库构建（`BUILD_SHARED_LIBS`）
 - ✅ CMake install/export，支持 `find_package(Evently CONFIG REQUIRED)`
 - ✅ C++11/C++17、GCC/MSVC、CTest 与 CI
@@ -89,8 +89,8 @@ Reflection/
 - ✅ 类型安全 `ObjectHandle`、统一错误码与元数据查询
 - ✅ 方法重载、const 实例调用、COW 并发读写
 - ✅ `noexcept`、完整 ref-qualified、静态/自由函数、运行期构造函数
-- ✅ 自动注册、批量事务、生命周期、插件作用域、按类分片、Pimpl ABI
-- ✅ JSON 示例、`Any` 小对象优化、基准、install/export、CI 与 280+ 项断言
+- ✅ 自动注册、批量事务、生命周期、插件作用域、按类分片、注册中心 Pimpl 实现隐藏
+- ✅ JSON 示例、`Any` 小对象优化、基准、install/export、CI 与 290+ 项断言
 
 ---
 
@@ -102,7 +102,7 @@ Reflection/
 - COW 按类分片：单类写入和元数据查询只处理该类
 - 新增 `PluginRegistration`：自动卸载作用域内注册的类，支持 `detach()`
 - 批量注册复用类分片，`RegistrationBatch` 成本进一步降低
-- 新增插件生命周期测试与分片基准
+- 新增插件生命周期测试，并补充 v4.2 分片基准数据
 - 精确类型匹配保持不变
 
 ### v4.1.0 - 批量 COW 与生命周期 (2026-10-22)
@@ -279,7 +279,7 @@ Reflection/
 - **Linux/GCC**：支持 C++11 和 C++17
 - **Windows/MSVC**：Visual Studio 2019 + Windows SDK
 - MSVC 没有 `/std:c++11`，使用默认或 `/std:c++14` 作为 C++11 基线；C++17 使用 `/std:c++17`
-- `EVENTLY_BUILD_EXAMPLES=OFF` 可关闭 `JsonSerializationExample`；`EVENTLY_BUILD_BENCHMARKS=ON` 构建 `ReflectionBenchmark`；测试由 `BUILD_TESTING` 控制
+- CMake 选项默认值：`EVENTLY_BUILD_EXAMPLES=ON`、`EVENTLY_BUILD_BENCHMARKS=OFF`、`EVENTLY_BUILD_DOCS=OFF`；测试由 `BUILD_TESTING` 控制（CTest 默认开启）
 
 ### Linux/GCC
 
@@ -369,9 +369,9 @@ ctest --test-dir build\msvc-cxx14 -R reflection_ --output-on-failure
 
 Linux 下对应运行 `build/gcc-cxx11/ReflectionTests --test Any`。
 
-测试组：`Any`、`Fields`、`Methods`、`Factory`、`Metadata`、`Functions`、`Qualifiers`、`Constructors`、`AutoRegistration`、`RegistrationBatch`、`Lifecycle`、`PluginLifecycle`、`RegistrationErrors`、`ThreadSafety`、`Clear`，共 280+ 项断言（C++17 额外包含 `noexcept` 用例）。CTest 将核心测试和会执行并发读写的 `ThreadSafety` 分开进程运行，并运行 `JsonSerializationExample`。
+测试组：`Any`、`Fields`、`Methods`、`Factory`、`Metadata`、`Functions`、`Qualifiers`、`Constructors`、`AutoRegistration`、`RegistrationBatch`、`Lifecycle`、`PluginLifecycle`、`RegistrationErrors`、`ThreadSafety`、`Clear`，共 290+ 项断言（C++14 291 项、C++17 294 项，C++17 额外包含 `noexcept` 用例）。CTest 将核心测试和会执行并发读写的 `ThreadSafety` 分开进程运行，并运行 `JsonSerializationExample`。
 
-v4.2 分片基准（WSL GCC 17 Release，100 个类）：逐条注册约 `1.14 ms`，批量注册约 `0.131 ms`，查询约 `0.023 ms`；相对 v4.1 的全局快照有显著下降。
+v4.2 分片基准（WSL GCC 17 Release，100 个类）：逐条注册约 `1.14 ms`，批量注册约 `0.131 ms`，查询约 `0.023 ms`。相对 v4.1 的全局快照，逐条注册约从 `4.33 ms` 降至 `1.14 ms`，批量注册约从 `0.159 ms` 降至 `0.131 ms`，查询约从 `0.147 ms` 降至 `0.023 ms`。
 
 ---
 
@@ -507,6 +507,8 @@ registry.clear();
     // plugin.detach(); // 如需保留注册，由调用方保证插件代码生命周期
 }
 ```
+
+`PluginRegistration` 是线程局部作用域，同一线程不能嵌套；它只允许注册新类，尝试修改宿主已有类会抛 `ReflectionError(InvalidArgument)`。`detach()` 会保留作用域内已注册的类，此后其生命周期由调用方负责。
 
 宿主必须在销毁 `PluginRegistration` 和卸载插件 DLL 前停止插件线程，并销毁所有引用插件类型的 `ObjectHandle`、setter `shared_ptr` 和 `Any`。
 
