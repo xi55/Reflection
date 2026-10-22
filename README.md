@@ -32,6 +32,9 @@
 - ✅ 方法重载解析（按参数数量和精确类型匹配）
 - ✅ `noexcept`、完整 ref-qualified（含 `&&`）、静态/自由函数
 - ✅ 运行期构造函数注册与参数匹配
+- ✅ `registerAll()` + `EVENTLY_REGISTER_CLASS` 自动注册队列
+- ✅ 基于字段元数据的 JSON 序列化示例
+- ✅ `Any` 小对象内联存储、move、`has_value`/`reset`/`emplace`
 - ✅ const 实例只能调用 const 方法
 - ✅ 初始化后 `freeze()`，之后可并发只读访问
 - ✅ CMake install/export，支持 `find_package(Evently CONFIG REQUIRED)`
@@ -52,6 +55,7 @@ Reflection/
 ├── main.cpp              # 使用示例/演示程序
 ├── tests/reflection_tests.cpp  # 断言式回归测试
 ├── examples/consumer/          # find_package 消费方示例
+├── examples/json_serialization.cpp # 字段元数据 JSON 序列化示例
 ├── scripts/build-msvc.ps1      # Windows/MSVC + Windows SDK 构建脚本
 ├── cmake/EventlyConfig.cmake.in # CMake package 配置模板
 ├── .github/workflows/ci.yml    # Linux/Windows/消毒器 CI
@@ -77,11 +81,20 @@ Reflection/
 - ✅ 类型安全 `ObjectHandle`、统一错误码与元数据查询
 - ✅ 方法重载、const 实例调用、冻结后并发只读
 - ✅ `noexcept`、完整 ref-qualified、静态/自由函数、运行期构造函数
-- ✅ install/export、CI 与 230+ 项断言的回归测试
+- ✅ 自动注册队列、JSON 序列化示例、`Any` 小对象优化
+- ✅ install/export、CI 与 250+ 项断言的回归测试
 
 ---
 
 ## 📅 更新日志
+
+### v3.2.0 - 便利层与性能 (2026-10-22)
+
+- 新增自动注册队列：`EVENTLY_REGISTER_CLASS` + `registerAll()`
+- 新增 `ClassRegistration<T>` 链式注册辅助类
+- 新增基于字段元数据的 JSON 序列化示例 `JsonSerializationExample`
+- `Any` 增加小对象内联存储、move、`has_value`/`reset`/`emplace`
+- 新增 `AutoRegistration` 测试与 JSON 示例 CTest
 
 ### v3.1.0 - 调用能力扩展 (2026-10-22)
 
@@ -200,10 +213,10 @@ Reflection/
    - 不进行隐式数值转换；`int` 参数必须传 `Any(int)`
    - 构造参数同样按精确 `type_index` 匹配
 
-3. **便利层尚未完成**：
-   - 暂无自动注册宏
-   - 暂无内置序列化/JSON 支持
-   - `Any` 仍以堆分配为主，未做小对象优化
+3. **便利层边界**：
+   - 自动注册宏应在 `.cpp` 中使用，并由用户显式调用 `registerAll()`
+   - JSON 仅作为序列化示例，不含反序列化或通用协议支持
+   - `Any` 小对象内联只覆盖小型、nothrow-move 类型，大对象仍堆分配
 
 4. **Windows 默认静态 CRT**：
    - 集成到 `/MD` 项目时需要统一 `CMAKE_MSVC_RUNTIME_LIBRARY`
@@ -211,11 +224,6 @@ Reflection/
 ---
 
 ## 🚀 后续方向
-
-### 🎯 v3.2.0 - 便利层
-- [ ] 自动注册宏（显式 `registerAll()` 优先）
-- [ ] 基于字段元数据的 JSON 序列化示例
-- [ ] `Any` 小对象优化与 move 优化
 
 ### 🎯 v4.0.0 - 动态与分发
 - [ ] COW 快照，支持冻结后动态注册
@@ -231,6 +239,7 @@ Reflection/
 - **Linux/GCC**：支持 C++11 和 C++17
 - **Windows/MSVC**：Visual Studio 2019 + Windows SDK
 - MSVC 没有 `/std:c++11`，使用默认或 `/std:c++14` 作为 C++11 基线；C++17 使用 `/std:c++17`
+- `EVENTLY_BUILD_EXAMPLES=OFF` 可关闭 `JsonSerializationExample`；测试由 `BUILD_TESTING` 控制
 
 ### Linux/GCC
 
@@ -299,7 +308,7 @@ ctest --test-dir build\msvc-cxx14 -R reflection_ --output-on-failure
 
 Linux 下对应运行 `build/gcc-cxx11/ReflectionTests --test Any`。
 
-测试组：`Any`、`Fields`、`Methods`、`Factory`、`Metadata`、`Functions`、`Qualifiers`、`Constructors`、`RegistrationErrors`、`ThreadSafety`，共 230+ 项断言（C++17 额外包含 `noexcept` 用例）。CTest 将核心测试和会冻结注册中心的 `ThreadSafety` 分开进程运行。
+测试组：`Any`、`Fields`、`Methods`、`Factory`、`Metadata`、`Functions`、`Qualifiers`、`Constructors`、`AutoRegistration`、`RegistrationErrors`、`ThreadSafety`，共 250+ 项断言（C++17 额外包含 `noexcept` 用例）。CTest 将核心测试和会冻结注册中心的 `ThreadSafety` 分开进程运行，并运行 `JsonSerializationExample`。
 
 ---
 
@@ -381,6 +390,28 @@ ObjectHandle person = registry.createInstanceWithArgs(
 ```
 
 `createInstance(className)` 优先使用 `registerClass` 绑定的工厂；没有工厂时使用无参构造函数。
+
+自动注册：
+
+```cpp
+EVENTLY_REGISTER_CLASS(Person, "Person")
+{
+    Evently::ClassRegistration<Person> registration("Person");
+    registration.constructor<>();
+    registration.field("name", &Person::name);
+    registration.field("age", &Person::age);
+    registration.method("setName", &Person::setName);
+}
+
+int main() {
+    Evently::ReflectionRegistry& registry =
+        Evently::ReflectionRegistry::getInstance();
+    registry.registerAll();
+    registry.freeze();
+}
+```
+
+宏应放在 `.cpp` 中；注册函数先进入队列，`registerAll()` 由用户显式执行，避免静态初始化阶段抛异常。JSON 序列化示例见 `examples/json_serialization.cpp`。
 
 对 `&&` / `const &&` 成员函数使用 `RvalueInstance`：
 

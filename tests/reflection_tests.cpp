@@ -181,6 +181,23 @@ namespace
         int value_ = 0;
     };
 
+    class AutoObject
+    {
+    public:
+        AutoObject() : value_(0) {}
+        int getValue() const { return value_; }
+
+        int value_;
+    };
+
+    EVENTLY_REGISTER_CLASS(AutoObject, "AutoObject")
+    {
+        Evently::ClassRegistration<AutoObject> registration("AutoObject");
+        registration.constructor<>();
+        registration.field("value", &AutoObject::value_);
+        registration.method("getValue", &AutoObject::getValue);
+    }
+
     int freeAdd(int a, int b)
     {
         return a + b;
@@ -346,6 +363,28 @@ namespace
         Any assigned;
         assigned = 5;
         CHECK(any_cast<int>(assigned) == 5);
+
+        CHECK(assigned.has_value());
+        assigned.reset();
+        CHECK(!assigned.has_value());
+        CHECK(assigned.empty());
+
+        Any emplaced;
+        emplaced.emplace<std::string>("emplaced");
+        CHECK(any_cast<std::string>(emplaced) == "emplaced");
+
+        Any first(1);
+        Any second(std::string("second"));
+        first.swap(second);
+        CHECK(any_cast<std::string>(first) == "second");
+        CHECK(any_cast<int>(second) == 1);
+
+        Any localSource(5);
+        Any localCopy(localSource);
+        Any localMoved(std::move(localSource));
+        CHECK(localSource.empty());
+        CHECK(any_cast<int>(localCopy) == 5);
+        CHECK(any_cast<int>(localMoved) == 5);
     }
 
     template <typename T>
@@ -844,6 +883,30 @@ namespace
                         "ConstructorObject")));
     }
 
+    void testAutoRegistration()
+    {
+        ReflectionRegistry &registry = ReflectionRegistry::getInstance();
+        CHECK(registry.hasClass("AutoObject"));
+        CHECK(registry.hasField("AutoObject", "value"));
+        CHECK(registry.hasMethod("AutoObject", "getValue"));
+
+        ObjectHandle object = registry.createInstance("AutoObject");
+        AutoObject *value = object.get<AutoObject>();
+        CHECK(value != nullptr);
+
+        PropertySetterBase *setter = registry.getSetter("AutoObject", "value");
+        CHECK(setter != nullptr);
+        if (value != nullptr && setter != nullptr)
+        {
+            setter->set(value, Any(11));
+            CHECK(any_cast<int>(registry.invokeMethod(
+                      "AutoObject", "getValue", value, {})) == 11);
+        }
+
+        CHECK(registry.getMethodNames("AutoObject").size() == 1u);
+        CHECK(registry.getConstructors("AutoObject").size() == 1u);
+    }
+
     void testRegistrationErrors()
     {
         ReflectionRegistry &registry = ReflectionRegistry::getInstance();
@@ -1009,6 +1072,7 @@ namespace
         {"Functions", testFunctions},
         {"Qualifiers", testQualifiers},
         {"Constructors", testConstructors},
+        {"AutoRegistration", testAutoRegistration},
         {"RegistrationErrors", testRegistrationErrors},
         {"ThreadSafety", testThreadSafety}};
 }
@@ -1037,6 +1101,7 @@ int main(int argc, char **argv)
     try
     {
         registerTypes();
+        ReflectionRegistry::getInstance().registerAll();
     }
     catch (const std::exception &error)
     {

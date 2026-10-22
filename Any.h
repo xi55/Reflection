@@ -2,104 +2,129 @@
 #define ANY_H
 #pragma once
 
+#include <cstddef>
+#include <new>
 #include <string>
+#include <type_traits>
 #include <typeinfo>
 #include <utility>
-#include <type_traits>
 
 namespace Evently
 {
-
-    /**
-     * @brief 类型擦除容器类，用于替代C++17的std::any
-     *
-     * 这个类可以存储任何类型的值，并在运行时保持类型信息。
-     * 类似于C++17的std::any，但兼容C++11标准。
-     */
     class Any
     {
     public:
-        /// 默认构造函数，创建空的Any对象
-        Any() : content_(nullptr) {}
+        Any() noexcept
+            : ops_(nullptr), local_(false), ptr_(nullptr) {}
 
-        /**
-         * @brief 模板构造函数，用于存储任意类型的值
-         * @tparam T 要存储的值的类型
-         * @param value 要存储的值
-         */
-        template <typename T>
-        Any(const T &value)
-            : content_(new Holder<typename std::decay<T>::type>(value)) {}
-
-        /// 拷贝构造函数
-        Any(const Any &other)
-            : content_(other.content_ ? other.content_->clone() : nullptr) {}
-
-        /// 移动构造函数（C++11 noexcept）
-        Any(Any &&other) noexcept : content_(other.content_)
+        template <
+            typename T,
+            typename std::enable_if<
+                !std::is_same<typename std::decay<T>::type, Any>::value,
+                int>::type = 0>
+        Any(T &&value)
+            : ops_(nullptr), local_(false), ptr_(nullptr)
         {
-            other.content_ = nullptr;
+            construct<typename std::decay<T>::type>(std::forward<T>(value));
         }
 
-        /// 析构函数，释放存储的对象
+        Any(const Any &other)
+            : ops_(nullptr), local_(false), ptr_(nullptr)
+        {
+            if (other.ops_ != nullptr)
+            {
+                other.ops_->copy(other, *this);
+            }
+        }
+
+        Any(Any &&other) noexcept
+            : ops_(nullptr), local_(false), ptr_(nullptr)
+        {
+            if (other.ops_ != nullptr)
+            {
+                other.ops_->move(other, *this);
+            }
+        }
+
         ~Any()
         {
-            delete content_;
+            reset();
         }
 
-        /// 拷贝赋值操作符
         Any &operator=(const Any &rhs)
         {
             Any(rhs).swap(*this);
             return *this;
         }
 
-        /// 移动赋值操作符
         Any &operator=(Any &&rhs) noexcept
         {
             if (this != &rhs)
             {
-                delete content_;
-                content_ = rhs.content_;
-                rhs.content_ = nullptr;
+                reset();
+                if (rhs.ops_ != nullptr)
+                {
+                    rhs.ops_->move(rhs, *this);
+                }
             }
             return *this;
         }
 
-        /**
-         * @brief 模板赋值操作符，用于赋值任意类型的值
-         * @tparam T 要赋值的值的类型
-         * @param value 要赋值的值
-         * @return Any& 返回自身引用
-         */
-        template <typename T>
-        Any &operator=(const T &value)
+        template <
+            typename T,
+            typename std::enable_if<
+                !std::is_same<typename std::decay<T>::type, Any>::value,
+                int>::type = 0>
+        Any &operator=(T &&value)
         {
-            Any(value).swap(*this);
+            Any(std::forward<T>(value)).swap(*this);
             return *this;
         }
 
-        /// 交换两个Any对象的内容
         void swap(Any &rhs) noexcept
         {
-            std::swap(content_, rhs.content_);
+            if (this == &rhs)
+            {
+                return;
+            }
+            Any temporary(std::move(rhs));
+            rhs = std::move(*this);
+            *this = std::move(temporary);
         }
 
-        /// 检查Any对象是否为空
         bool empty() const noexcept
         {
-            return !content_;
+            return ops_ == nullptr;
         }
 
-        /// 获取存储值的类型信息
+        bool has_value() const noexcept
+        {
+            return ops_ != nullptr;
+        }
+
         const std::type_info &type() const noexcept
         {
-            return content_ ? content_->type() : typeid(void);
+            return ops_ != nullptr ? ops_->type() : typeid(void);
         }
 
-        /**
-         * @brief 友元函数声明，允许any_cast访问私有成员
-         */
+        void reset() noexcept
+        {
+            if (ops_ != nullptr)
+            {
+                ops_->destroy(data(), local_);
+                ops_ = nullptr;
+                local_ = false;
+                ptr_ = nullptr;
+            }
+        }
+
+        template <typename T, typename... Args>
+        void emplace(Args &&...args)
+        {
+            reset();
+            construct<T>(std::forward<Args>(args)...);
+        }
+
         template <typename T>
         friend T any_cast(const Any &operand);
 
@@ -113,80 +138,181 @@ namespace Evently
         friend const T *any_cast(const Any *operand);
 
     private:
-        /**
-         * @brief 占位符基类，用于类型擦除
-         *
-         * 这是一个抽象基类，用于在Any中存储不同类型的值
-         * 而不需要知道具体的类型信息。
-         */
-        class PlaceHolder
-        {
-        public:
-            virtual ~PlaceHolder() {}
+        static const std::size_t BufferSize = 16;
 
-            /// 获取存储值的类型信息
-            virtual const std::type_info &type() const = 0;
+        typedef typename std::aligned_storage<
+            BufferSize, alignof(std::max_align_t)>::type Storage;
 
-            /// 克隆当前对象
-            virtual PlaceHolder *clone() const = 0;
-        };
-
-        /**
-         * @brief 具体的值持有者模板类
-         * @tparam T 存储的值的类型
-         *
-         * 这个类继承自PlaceHolder，用于存储具体类型的值
-         */
         template <typename T>
-        class Holder : public PlaceHolder
+        struct FitsInline
         {
-        public:
-            /// 构造函数，存储给定的值
-            Holder(const T &value) : held(value) {}
-
-            /// 返回存储值的类型信息
-            const std::type_info &type() const override
-            {
-                return typeid(T);
-            }
-
-            /// 克隆当前Holder对象
-            PlaceHolder *clone() const override
-            {
-                return new Holder(held);
-            }
-
-            T held; ///< 实际存储的值
+            static const bool value =
+                sizeof(T) <= BufferSize &&
+                alignof(T) <= alignof(Storage) &&
+                std::is_nothrow_move_constructible<T>::value;
         };
 
-        PlaceHolder *content_; ///< 指向实际存储对象的指针
+        struct Ops
+        {
+            const std::type_info &(*type)();
+            void (*destroy)(void *, bool);
+            void (*copy)(const Any &, Any &);
+            void (*move)(Any &, Any &);
+        };
+
+        template <typename T>
+        static const std::type_info &typeImpl()
+        {
+            return typeid(T);
+        }
+
+        template <typename T>
+        static void destroyImpl(void *object, bool local)
+        {
+            if (local)
+            {
+                static_cast<T *>(object)->~T();
+            }
+            else
+            {
+                delete static_cast<T *>(object);
+            }
+        }
+
+        template <typename T>
+        static void copyImpl(const Any &source, Any &target)
+        {
+            copyDispatch<T>(
+                std::integral_constant<bool, FitsInline<T>::value>{},
+                source, target);
+        }
+
+        template <typename T>
+        static void copyDispatch(std::true_type, const Any &source, Any &target)
+        {
+            const T *value = static_cast<const T *>(source.data());
+            new (&target.storage_) T(*value);
+            target.local_ = true;
+            target.ptr_ = nullptr;
+            target.ops_ = &opsFor<T>();
+        }
+
+        template <typename T>
+        static void copyDispatch(std::false_type, const Any &source, Any &target)
+        {
+            target.ptr_ = new T(*static_cast<const T *>(source.data()));
+            target.local_ = false;
+            target.ops_ = &opsFor<T>();
+        }
+
+        template <typename T>
+        static void moveImpl(Any &source, Any &target)
+        {
+            moveDispatch<T>(
+                std::integral_constant<bool, FitsInline<T>::value>{},
+                source, target);
+        }
+
+        template <typename T>
+        static void moveDispatch(std::true_type, Any &source, Any &target)
+        {
+            T *value = static_cast<T *>(source.data());
+            new (&target.storage_) T(std::move(*value));
+            target.local_ = true;
+            target.ptr_ = nullptr;
+            target.ops_ = &opsFor<T>();
+            value->~T();
+            source.ops_ = nullptr;
+            source.local_ = false;
+        }
+
+        template <typename T>
+        static void moveDispatch(std::false_type, Any &source, Any &target)
+        {
+            target.ptr_ = source.ptr_;
+            target.local_ = false;
+            target.ops_ = &opsFor<T>();
+            source.ptr_ = nullptr;
+            source.ops_ = nullptr;
+            source.local_ = false;
+        }
+
+        template <typename T>
+        static const Ops &opsFor()
+        {
+            static const Ops ops = {
+                &typeImpl<T>,
+                &destroyImpl<T>,
+                &copyImpl<T>,
+                &moveImpl<T>};
+            return ops;
+        }
+
+        template <typename T, typename... Args>
+        void construct(Args &&...args)
+        {
+            static_assert(std::is_copy_constructible<T>::value,
+                          "Any requires copy-constructible types");
+            constructDispatch<T>(
+                std::integral_constant<bool, FitsInline<T>::value>{},
+                *this, std::forward<Args>(args)...);
+        }
+
+        template <typename T, typename... Args>
+        static void constructDispatch(std::true_type, Any &target,
+                                      Args &&...args)
+        {
+            new (&target.storage_) T(std::forward<Args>(args)...);
+            target.local_ = true;
+            target.ptr_ = nullptr;
+            target.ops_ = &opsFor<T>();
+        }
+
+        template <typename T, typename... Args>
+        static void constructDispatch(std::false_type, Any &target,
+                                      Args &&...args)
+        {
+            target.ptr_ = new T(std::forward<Args>(args)...);
+            target.local_ = false;
+            target.ops_ = &opsFor<T>();
+        }
+
+        void *data() noexcept
+        {
+            return local_ ? static_cast<void *>(&storage_) : ptr_;
+        }
+
+        const void *data() const noexcept
+        {
+            return local_ ? static_cast<const void *>(&storage_) : ptr_;
+        }
+
+        const Ops *ops_;
+        bool local_;
+        void *ptr_;
+        Storage storage_;
     };
 
-    /**
-     * @brief Any类型转换失败时抛出的异常
-     *
-     * 当any_cast尝试将Any对象转换为不匹配的类型时抛出此异常
-     */
+    inline void swap(Any &lhs, Any &rhs) noexcept
+    {
+        lhs.swap(rhs);
+    }
+
     class bad_any_cast : public std::bad_cast
     {
     public:
-        bad_any_cast(const std::string &message) : message_(message) {};
+        explicit bad_any_cast(const std::string &message)
+            : message_(message) {}
 
         const char *what() const noexcept override
         {
             return message_.c_str();
         }
+
     private:
         std::string message_;
     };
 
-    /**
-     * @brief 类型转换函数，将Any对象转换为指定类型
-     * @tparam T 目标类型
-     * @param operand 要转换的Any对象
-     * @return T 转换后的值
-     * @throws std::bad_cast 如果类型不匹配
-     */
     template <typename T>
     T any_cast(const Any &operand)
     {
@@ -202,8 +328,8 @@ namespace Evently
                                std::string(operand.type().name()) + " to " +
                                std::string(typeid(U).name()));
         }
-        const U &value = static_cast<const Any::Holder<U> *>(operand.content_)->held;
-        return static_cast<T>(value);
+        const U *value = static_cast<const U *>(operand.data());
+        return static_cast<T>(*value);
     }
 
     template <typename T>
@@ -218,29 +344,21 @@ namespace Evently
                                std::string(operand.type().name()) + " to " +
                                std::string(typeid(U).name()));
         }
-        return static_cast<T>(
-            static_cast<Any::Holder<U> *>(operand.content_)->held);
+        U *value = static_cast<U *>(operand.data());
+        return static_cast<T>(*value);
     }
 
-    /**
-     * @brief 指针版本的类型转换函数
-     * @tparam T 目标类型
-     * @param operand 指向Any对象的指针
-     * @return T* 如果类型匹配返回指向值的指针，否则返回nullptr
-     */
     template <typename T>
     T *any_cast(Any *operand)
     {
         static_assert(!std::is_reference<T>::value,
                       "any_cast pointer form requires a non-reference type");
         typedef typename std::remove_cv<T>::type U;
-        if (!operand || operand->type() != typeid(U))
+        if (operand == nullptr || operand->type() != typeid(U))
         {
             return nullptr;
         }
-        Any::Holder<U> *holder =
-            static_cast<Any::Holder<U> *>(operand->content_);
-        return &holder->held;
+        return static_cast<T *>(operand->data());
     }
 
     template <typename T>
@@ -249,15 +367,12 @@ namespace Evently
         static_assert(!std::is_reference<T>::value,
                       "any_cast pointer form requires a non-reference type");
         typedef typename std::remove_cv<T>::type U;
-        if (!operand || operand->type() != typeid(U))
+        if (operand == nullptr || operand->type() != typeid(U))
         {
             return nullptr;
         }
-        const Any::Holder<U> *holder =
-            static_cast<const Any::Holder<U> *>(operand->content_);
-        return &holder->held;
+        return static_cast<const T *>(operand->data());
     }
-
-} // namespace Evently
+}
 
 #endif // ANY_H

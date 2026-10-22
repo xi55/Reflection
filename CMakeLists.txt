@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(EventlyReflection VERSION 3.1.0 LANGUAGES CXX)
+project(EventlyReflection VERSION 3.2.0 LANGUAGES CXX)
 
 if(MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" CACHE STRING "MSVC runtime library")
@@ -8,6 +8,7 @@ endif()
 
 set(EVENTLY_CXX_STANDARD "11" CACHE STRING "C++ standard: 11, 14, or 17")
 set_property(CACHE EVENTLY_CXX_STANDARD PROPERTY STRINGS 11 14 17)
+option(EVENTLY_BUILD_EXAMPLES "Build example programs" ON)
 
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
@@ -46,6 +47,14 @@ add_executable(Test
 target_link_libraries(Test PRIVATE evently_reflection)
 evently_target_defaults(Test)
 
+if(EVENTLY_BUILD_EXAMPLES)
+    add_executable(JsonSerializationExample
+        examples/json_serialization.cpp
+    )
+    target_link_libraries(JsonSerializationExample PRIVATE evently_reflection)
+    evently_target_defaults(JsonSerializationExample)
+endif()
+
 include(CTest)
 if(BUILD_TESTING)
     find_package(Threads REQUIRED)
@@ -56,6 +65,9 @@ if(BUILD_TESTING)
     evently_target_defaults(ReflectionTests)
     add_test(NAME reflection_core COMMAND ReflectionTests --exclude ThreadSafety)
     add_test(NAME reflection_thread_safety COMMAND ReflectionTests --test ThreadSafety)
+    if(EVENTLY_BUILD_EXAMPLES)
+        add_test(NAME json_serialization_example COMMAND JsonSerializationExample)
+    endif()
 endif()
 
 install(TARGETS evently_reflection

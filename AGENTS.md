@@ -17,14 +17,17 @@
   C++17 用 `-Standard 17`。构建目录是 `build\msvc-cxx14` / `build\msvc-cxx17`。
 - MSVC 没有 `/std:c++11`；CMake 的 `CXX_STANDARD 11` 在 MSVC 上不加 `/std` 参数，实际使用默认 C++14。真正的 C++11 门槛是 GCC 的 `-std=c++11`。
 - CMake 变量 `EVENTLY_CXX_STANDARD` 可取 `11/14/17`，默认 `11`；`CXX_EXTENSIONS OFF`。
-- 单测：`build\msvc-cxx14\ReflectionTests.exe --test Any`，或 `ctest --test-dir build\msvc-cxx14 -R reflection_ --output-on-failure`。测试组：`Any`、`Fields`、`Methods`、`Factory`、`Metadata`、`Functions`、`Qualifiers`、`Constructors`、`RegistrationErrors`、`ThreadSafety`，共 230+ 项断言（C++17 额外包含 `noexcept` 用例）。CTest 把核心测试和会冻结注册中心的 `ThreadSafety` 分成两个独立进程。
+- 单测：`build\msvc-cxx14\ReflectionTests.exe --test Any`，或 `ctest --test-dir build\msvc-cxx14 -R reflection_ --output-on-failure`。测试组：`Any`、`Fields`、`Methods`、`Factory`、`Metadata`、`Functions`、`Qualifiers`、`Constructors`、`AutoRegistration`、`RegistrationErrors`、`ThreadSafety`，共 250+ 项断言（C++17 额外包含 `noexcept` 用例）。CTest 把核心测试和会冻结注册中心的 `ThreadSafety` 分成两个独立进程，并运行 `JsonSerializationExample`。
+- `EVENTLY_BUILD_EXAMPLES` 控制 `JsonSerializationExample`；`examples/consumer` 是独立安装消费方示例，不在主构建中。
 - 源文件是无 BOM 的 UTF-8，含中文注释和字符串；MSVC 的 `/utf-8` 已由 CMake 统一加到库和测试，并通过 `evently_reflection` 的 INTERFACE 选项传播给安装后的消费方，不要移除。
 - 本机 Windows SDK 在 `D:\Windows Kits\10`，但 SDK 注册表键可能缺失：单独运行 `vcvars64.bat` 只会设置 MSVC 的 `INCLUDE/LIB`，不会设置 UCRT/SDK。使用 `scripts/build-msvc.ps1`，或手动注入 SDK 的 `INCLUDE/LIB/PATH`；Debug 程序还需要 SDK 的 `ucrt` 运行时目录和 MSVC Debug CRT 目录。
 - Windows 默认使用静态 MSVC 运行时（Debug `/MTd`，Release `/MT`），所以 `Test.exe`/`ReflectionTests.exe` 可以在普通 PowerShell 中直接运行。若把 `evently_reflection` 链接到 `/MD` 项目，必须统一 `CMAKE_MSVC_RUNTIME_LIBRARY`；安装包只包含本次构建配置，Debug/Release 也要匹配。
 - 安装：`cmake --install build/gcc-cxx11 --prefix install`。消费方用 `find_package(Evently CONFIG REQUIRED)`、`target_link_libraries(app PRIVATE Evently::Reflection)`、`#include <Evently/Reflection.h>`。
 
 ## 已知陷阱
-- `Any` 的存储类型统一 decay。`any_cast<const T>`、`any_cast<const T&>` 是安全的；非 const `T&` 只能从非 const `Any` 取；`any_cast<T&>(const Any&)` 会触发 `static_assert`。不要重新引入 `Holder<T&>` / `Holder<const T>` 的向下转型。
+- `Any` 的存储类型统一 decay。`any_cast<const T>`、`any_cast<const T&>` 是安全的；非 const `T&` 只能从非 const `Any` 取；`any_cast<T&>(const Any&)` 会触发 `static_assert`。不要重新引入引用/cv 的向下转型。
+- `Any` 对小型、nothrow-move 且对齐合适的类型使用 16 字节内联存储，其他类型堆分配；支持 `has_value`/`reset`/`emplace`/move。修改 `Any` 时重点验证拷贝、移动、析构和 `any_cast` 指针稳定性。
+- 自动注册使用 `EVENTLY_REGISTER_CLASS` + `ClassRegistration<T>`；宏必须在 `.cpp` 中使用，运行时显式调用 `registerAll()`。不要把头文件中的自动注册宏包含到多个 TU，否则会重复注册。
 - `getParam` 在编译期拒绝非 const 左值引用和右值引用参数；反射方法参数只能按值或 const 引用传递。
 - `registerField<T>(fieldName, field)` 依赖先调用 `registerClassName<T>`；未注册时抛 `ReflectionError(ClassNotFound)`。
 - `registerClass` 使用 `ObjectFactorySelector` 选择工厂，避免两个分支同时实例化；无默认构造函数的 T 必须带构造参数注册。字段/方法/构造函数/工厂/类名重复注册默认抛 `ReflectionError(DuplicateRegistration)`。

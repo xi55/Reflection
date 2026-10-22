@@ -4,6 +4,34 @@
 
 namespace Evently
 {
+    namespace detail
+    {
+        RegistrationQueue &RegistrationQueue::getInstance()
+        {
+            static RegistrationQueue instance;
+            return instance;
+        }
+
+        void RegistrationQueue::add(void (*function)())
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            functions_.push_back(function);
+        }
+
+        void RegistrationQueue::runAll()
+        {
+            std::vector<void (*)()> functions;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                functions.swap(functions_);
+            }
+            for (std::size_t index = 0; index < functions.size(); ++index)
+            {
+                functions[index]();
+            }
+        }
+    }
+
     std::size_t PairHash::operator()(const std::pair<std::string, std::string> &pair) const
     {
         auto hash1 = std::hash<std::string>{}(pair.first);
@@ -213,6 +241,11 @@ namespace Evently
         }
         factories_[className] = std::move(factory);
         ensureClassLocked(className);
+    }
+
+    void ReflectionRegistry::registerAll()
+    {
+        detail::RegistrationQueue::getInstance().runAll();
     }
 
     void ReflectionRegistry::freeze()

@@ -532,6 +532,28 @@ namespace Evently
         struct FreeFunctionTag
         {
         };
+
+        class RegistrationQueue
+        {
+        public:
+            static RegistrationQueue &getInstance();
+            void add(void (*function)());
+            void runAll();
+
+        private:
+            RegistrationQueue() {}
+            std::mutex mutex_;
+            std::vector<void (*)()> functions_;
+        };
+
+        class StaticRegistrar
+        {
+        public:
+            explicit StaticRegistrar(void (*function)())
+            {
+                RegistrationQueue::getInstance().add(function);
+            }
+        };
     }
 
     class ReflectionRegistry
@@ -675,6 +697,7 @@ namespace Evently
         std::vector<std::string> getClassNames() const;
         ClassInfo getClassInfo(const std::string &className) const;
 
+        void registerAll();
         void freeze();
         bool isFrozen() const noexcept;
 
@@ -736,6 +759,64 @@ namespace Evently
         std::unordered_map<std::string, std::type_index> classNameOwners_;
         std::set<std::string> classNamesSet_;
         std::unordered_map<std::string, std::unique_ptr<ObjectFactory>> factories_;
+    };
+
+    template <typename T>
+    class ClassRegistration
+    {
+    public:
+        explicit ClassRegistration(const std::string &className)
+            : registry_(ReflectionRegistry::getInstance()),
+              className_(className)
+        {
+            registry_.registerClassName<T>(className_);
+        }
+
+        template <typename... Args>
+        ClassRegistration &constructor()
+        {
+            registry_.registerConstructor<T, Args...>(className_);
+            return *this;
+        }
+
+        template <typename... Args>
+        ClassRegistration &factory(Args... args)
+        {
+            registry_.registerClass<T>(className_, args...);
+            return *this;
+        }
+
+        template <typename FieldType>
+        ClassRegistration &field(const std::string &fieldName, FieldType T::*field)
+        {
+            registry_.registerField<T>(className_, fieldName, field);
+            return *this;
+        }
+
+        template <typename MethodType>
+        ClassRegistration &method(const std::string &methodName, MethodType method)
+        {
+            registry_.registerMethod<T>(className_, methodName, method);
+            return *this;
+        }
+
+        template <typename ReturnType, typename... Args>
+        ClassRegistration &staticMethod(const std::string &methodName,
+                                        ReturnType (*method)(Args...))
+        {
+            registry_.registerStaticMethod<T, ReturnType, Args...>(
+                className_, methodName, method);
+            return *this;
+        }
+
+        const std::string &className() const
+        {
+            return className_;
+        }
+
+    private:
+        ReflectionRegistry &registry_;
+        std::string className_;
     };
 
     template <typename ParamType>
@@ -981,5 +1062,16 @@ namespace Evently
                      new PropertySetter<T, FieldType>(field)));
     }
 }
+
+#define EVENTLY_DETAIL_CONCAT_IMPL(lhs, rhs) lhs##rhs
+#define EVENTLY_DETAIL_CONCAT(lhs, rhs) EVENTLY_DETAIL_CONCAT_IMPL(lhs, rhs)
+
+#define EVENTLY_REGISTER_CLASS(Type, Name)                                     \
+    static void EVENTLY_DETAIL_CONCAT(evently_registration_function_,          \
+                                      __LINE__)();                             \
+    static ::Evently::detail::StaticRegistrar                                  \
+        EVENTLY_DETAIL_CONCAT(evently_registration_object_, __LINE__)(         \
+            &EVENTLY_DETAIL_CONCAT(evently_registration_function_, __LINE__)); \
+    static void EVENTLY_DETAIL_CONCAT(evently_registration_function_, __LINE__)()
 
 #endif // REFLECTION_H
