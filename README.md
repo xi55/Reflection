@@ -42,7 +42,9 @@ Reflection/
 ├── IndexSequence.h       # C++11 兼容的 index_sequence 实现
 ├── Reflection.h          # 反射系统核心类与接口定义
 ├── Reflection.cpp        # 接口实现，包括哈希函数、注册中心逻辑等
-├── main.cpp             # 测试程序和使用示例
+├── main.cpp             # 使用示例/演示程序
+├── tests/reflection_tests.cpp  # 断言式回归测试
+├── scripts/build-msvc.ps1      # Windows/MSVC + Windows SDK 构建脚本
 ├── CMakeLists.txt       # CMake 构建配置
 └── README.md            # 项目文档
 ```
@@ -57,9 +59,11 @@ Reflection/
 - ✅ 工厂系统可创建带参和无参对象
 - ✅ 支持运行时方法和字段查询
 - ✅ 提供统一的注册中心 `ReflectionRegistry` 管理所有类信息
-- ✅ **新增：C++11 兼容性**
-- ✅ **新增：自定义 Any 类型擦除系统**
-- ✅ **新增：void 返回类型方法的正确处理**
+- ✅ C++11 与 C++17 双标准构建
+- ✅ Linux/GCC 与 Windows/MSVC 构建
+- ✅ 自定义 Any 类型擦除系统，修正 cv/引用转换
+- ✅ void 返回类型方法的正确处理
+- ✅ 断言式回归测试与 CTest 集成
 
 代码结构清晰，易于扩展，已初步具备实际应用能力。
 
@@ -67,12 +71,27 @@ Reflection/
 
 ## 📅 更新日志
 
+### v2.2.0 - C++11/C++17 双标准与 Windows/MSVC 支持 (2026-10-22)
+
+#### 🎯 主要更新
+- 移除 MSVC 不支持的 `<cxxabi.h>`，移除 C++17 专属 `if constexpr`
+- CMake 支持 `EVENTLY_CXX_STANDARD=11/14/17`，新增静态库目标与 CTest
+- 新增 Windows/MSVC + Windows SDK 构建脚本
+- 新增断言式测试 `ReflectionTests`，覆盖 Any、字段、方法、工厂和错误处理
+
+#### 🐛 修复
+- 修正 `Any` 对 `const T`、`const T&`、`T&` 的类型转换
+- 修正 const 引用方法参数和 const 字段读取路径
+- 修正 `registerClass` 对无默认构造函数类型的实例化问题
+- `registerField<T>(fieldName, field)` 未注册类名时改为抛异常
+- 类名内部索引改用 `std::type_index`，不再依赖 mangled name
+
 ### v2.1.0 - const 方法与 const 语义增强 (2026-01-06)
 
 #### 🎯 主要更新
 - 支持注册与调用 `const` 成员函数（新增 `ConstMethodInvoker`）
 - const 字段的 setter 自动屏蔽，防止误写
-- `Any`/`getParam` 保留顶层 `const`，类型匹配更严格
+- `Any`/`getParam` 增加 const 字段与 const 引用方法参数的类型匹配
 
 #### 🐛 修复
 - 修正 `any_cast` const 情况下的类型匹配错误
@@ -132,19 +151,17 @@ Reflection/
 
 虽然系统功能完整，但目前仍存在以下问题：
 
-1. **使用 `typeid(T).name()` 获取类名存在跨平台兼容性问题**：
-   - GCC、Clang 和 MSVC 返回的类型名格式不同，可能导致注册失败
-   - 需要引入类型名解析函数
+1. **对象所有权仍偏底层**：
+   - 使用 `std::unique_ptr<void, void(*)(void*)>` 管理对象内存，`void*` 不具备类型安全
+   - 创建出的对象需要调用方自行转换到具体类型
 
-2. **内存管理复杂性高**：
-   - 使用 `std::unique_ptr<void, void(*)(void*)>` 来管理对象内存较为危险
-   - `void*` 不具备类型安全
-
-3. **缺乏线程安全保证**：
+2. **缺乏线程安全保证**：
    - `ReflectionRegistry` 尚未引入锁机制，不能保证多线程注册/调用安全
+   - 建议在启动阶段完成注册，之后只读使用
 
-4. **错误处理机制不一致**：
-   - 有些函数通过异常处理，有些则直接返回空值，接口不够统一
+3. **错误处理仍不完全统一**：
+   - 大部分查询和调用通过异常报告错误
+   - 部分查询仍以空 `Any` 或 `nullptr` 表示“未找到”
 
 ---
 
@@ -157,53 +174,83 @@ Reflection/
 - [x] 支持 const 成员方法的注册和调用
 - [x] 更新测试用例 / 示例
 
-### 🎯 v2.2.0 - 错误处理优化
-- [ ] 增加类型校验提示，避免 `bad_any_cast`
+### 🎯 v2.3.0 - 错误处理优化
 - [ ] 改用 `std::optional` 风格接口返回调用结果
-- [ ] 统一错误处理机制
+- [ ] 统一“未找到”与“类型错误”的返回/异常策略
 
-### 🎯 v2.3.0 - 工厂接口重构
+### 🎯 v2.4.0 - 工厂接口重构
 - [ ] 使用 `std::shared_ptr<void>` 替代 `unique_ptr<void, void(*)(void*)>`
 - [ ] 引入模板化工厂，简化对象生命周期管理
 - [ ] 提升类型安全性
 
 ### 🎯 v3.0.0 - 高级特性
-- [ ] 引入统一的 `demangleTypeName()` 解决跨平台类型名问题
 - [ ] 使用 `std::mutex` 提供线程安全版本
+- [ ] 支持方法重载、`noexcept` 与 ref-qualified 成员函数
 - [ ] 提供自动注册宏简化用户使用：
   ```cpp
   REGISTER_CLASS(MyClass)
   REGISTER_METHOD(MyClass, foo)
   REGISTER_FIELD(MyClass, bar)
   ```
+- [ ] 增加 install/export 与 CI 构建矩阵
 
 ---
 
-## 🛠️ 编译说明
+## 🛠️ 编译与测试
 
 ### 环境要求
-- **C++11** 或更高版本编译器
-- CMake 3.5+
+- **CMake 3.20+**
+- **Linux/GCC**：支持 C++11 和 C++17
+- **Windows/MSVC**：Visual Studio 2019 + Windows SDK
+- MSVC 没有 `/std:c++11`，使用默认或 `/std:c++14` 作为 C++11 基线；C++17 使用 `/std:c++17`
 
-### 编译步骤
+### Linux/GCC
+
 ```bash
-# 1. 创建构建目录
-mkdir build && cd build
+cmake -S . -B build/gcc-cxx11 -DEVENTLY_CXX_STANDARD=11 -DCMAKE_BUILD_TYPE=Debug
+cmake --build build/gcc-cxx11 -j
+ctest --test-dir build/gcc-cxx11 --output-on-failure
+./build/gcc-cxx11/Test
 
-# 2. 配置 CMake
-cmake ..
-
-# 3. 编译
-make
-
-# 4. 运行测试
-./Test
+cmake -S . -B build/gcc-cxx17 -DEVENTLY_CXX_STANDARD=17 -DCMAKE_BUILD_TYPE=Debug
+cmake --build build/gcc-cxx17 -j
+ctest --test-dir build/gcc-cxx17 --output-on-failure
 ```
+
+### Windows/MSVC
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-msvc.ps1 -Standard 14
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-msvc.ps1 -Standard 17
+```
+
+脚本会定位 Visual Studio 2019 和 `D:\Windows Kits\10`，向当前进程注入 SDK 的 `INCLUDE`、`LIB`、`PATH`，然后使用 Ninja 配置、构建并运行 CTest。它不会修改系统注册表。如果你的安装路径不同：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-msvc.ps1 `
+  -Standard 17 -VsRoot "C:\Program Files (x86)\Microsoft Visual Studio\2019\Community" `
+  -SdkRoot "C:\Program Files (x86)\Windows Kits\10"
+```
+
+构建目录分别为 `build\msvc-cxx14` 和 `build\msvc-cxx17`。
+
+CMake 默认将 MSVC 运行时设置为静态（Debug 为 `/MTd`，Release 为 `/MT`），因此 `Test.exe` 和 `ReflectionTests.exe` 不依赖额外的 Debug CRT DLL。如果要把 `evently_reflection` 集成到使用 `/MD` 的项目，请把双方的 `CMAKE_MSVC_RUNTIME_LIBRARY` 设置为一致。
 
 ### 手动编译
+
 ```bash
-g++ -std=c++11 -o reflection_test main.cpp Reflection.cpp
+g++ -std=c++11 -Wall -Wextra -I. main.cpp Reflection.cpp -o Test
+g++ -std=c++17 -Wall -Wextra -I. main.cpp Reflection.cpp -o Test
 ```
+
+### 运行单个测试
+
+```powershell
+build\msvc-cxx14\ReflectionTests.exe --test Any
+ctest --test-dir build\msvc-cxx14 -R reflection_tests --output-on-failure
+```
+
+Linux 下对应运行 `build/gcc-cxx11/ReflectionTests --test Any`。
 
 ---
 
@@ -262,4 +309,4 @@ int main() {
 
 ---
 
-*最后更新：2026-01-06*
+*最后更新：2026-10-22*

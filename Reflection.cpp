@@ -2,7 +2,6 @@
 #include "Any.h"
 #include <stdexcept>
 #include <functional>
-#include <iostream>
 
 namespace Evently
 {
@@ -31,19 +30,6 @@ namespace Evently
 
     ReflectionRegistry::ReflectionRegistry()
     {
-        // 显式初始化所有成员容器（C++11兼容写法）
-        setters_ = std::unordered_map<std::pair<std::string, std::string>,
-                                      std::unique_ptr<PropertySetterBase>,
-                                      PairHash,
-                                      PairEqual>();
-        setterWritable_ = std::unordered_map<std::pair<std::string, std::string>, bool, PairHash, PairEqual>();
-        methods_ = std::unordered_map<std::pair<std::string, std::string>,
-                                      std::unique_ptr<MethodInvokerBase>,
-                                      PairHash,
-                                      PairEqual>();
-        methodNames_ = std::unordered_map<std::string, std::set<std::string>>();
-        classNames_ = std::unordered_map<std::string, std::string>();
-        factories_ = std::unordered_map<std::string, std::unique_ptr<ObjectFactory>>();
     }
 
     PropertySetterBase *ReflectionRegistry::getSetter(const std::string &className,
@@ -70,6 +56,10 @@ namespace Evently
     std::unordered_map<std::string, Any> ReflectionRegistry::getAllValues(
         const std::string &className, const void *instance) const
     {
+        if (instance == nullptr)
+        {
+            throw std::invalid_argument("实例指针不能为空");
+        }
 
         std::unordered_map<std::string, Any> values;
 
@@ -92,17 +82,15 @@ namespace Evently
                                       const std::string &fieldName,
                                       const void *instance) const
     {
-        // 遍历查找指定的属性
-        for (const auto &pair : setters_)
+        if (instance == nullptr)
         {
-            const auto &key = pair.first;     // (类名, 属性名)
-            const auto &setter = pair.second; // 属性设置器
-
-            // 找到匹配的类名和属性名
-            if (key.first == className && key.second == fieldName)
-            {
-                return setter->get(instance);
-            }
+            throw std::invalid_argument("实例指针不能为空");
+        }
+        auto key = std::make_pair(className, fieldName);
+        auto it = setters_.find(key);
+        if (it != setters_.end())
+        {
+            return it->second->get(instance);
         }
 
         // 未找到则返回空Any对象
@@ -126,17 +114,7 @@ namespace Evently
 
         if (it != methods_.end())
         {
-            try
-            {
-                // 调用找到的方法
-                Any result = it->second->invoke(instance, args);
-                return result;
-            }
-            catch (const std::exception &e)
-            {
-                std::cerr << "方法调用失败: " << e.what() << '\n';
-                throw; // 重新抛出异常以便上层处理
-            }
+            return it->second->invoke(instance, args);
         }
 
         // 未找到方法时抛出异常

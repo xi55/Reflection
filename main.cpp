@@ -148,6 +148,70 @@ void registerPersonReflection()
     registry.registerMethod<Person, int, int>("Person", "TestConstMethodWithReturn", &Person::TestConstMethodWithReturn);
 }
 
+void printAny(const Any &value)
+{
+    if (value.empty())
+    {
+        std::cout << "<empty>";
+    }
+    else if (value.type() == typeid(std::string))
+    {
+        std::cout << any_cast<std::string>(value);
+    }
+    else if (value.type() == typeid(int))
+    {
+        std::cout << any_cast<int>(value);
+    }
+    else if (value.type() == typeid(unsigned int))
+    {
+        std::cout << any_cast<unsigned int>(value);
+    }
+    else if (value.type() == typeid(long long))
+    {
+        std::cout << any_cast<long long>(value);
+    }
+    else if (value.type() == typeid(unsigned long long))
+    {
+        std::cout << any_cast<unsigned long long>(value);
+    }
+    else if (value.type() == typeid(short))
+    {
+        std::cout << any_cast<short>(value);
+    }
+    else if (value.type() == typeid(unsigned short))
+    {
+        std::cout << any_cast<unsigned short>(value);
+    }
+    else if (value.type() == typeid(signed char))
+    {
+        std::cout << static_cast<int>(any_cast<signed char>(value));
+    }
+    else if (value.type() == typeid(unsigned char))
+    {
+        std::cout << static_cast<int>(any_cast<unsigned char>(value));
+    }
+    else if (value.type() == typeid(char))
+    {
+        std::cout << any_cast<char>(value);
+    }
+    else if (value.type() == typeid(bool))
+    {
+        std::cout << (any_cast<bool>(value) ? "true" : "false");
+    }
+    else if (value.type() == typeid(float))
+    {
+        std::cout << any_cast<float>(value);
+    }
+    else if (value.type() == typeid(double))
+    {
+        std::cout << any_cast<double>(value);
+    }
+    else
+    {
+        std::cout << "<unsupported>";
+    }
+}
+
 /**
  * @brief 测试反射创建对象功能
  */
@@ -203,21 +267,7 @@ void testPropertyAccess()
     for (const auto &pair : allValues)
     {
         std::cout << "  " << pair.first << ": ";
-        try
-        {
-            if (pair.first == "name")
-            {
-                std::cout << any_cast<std::string>(pair.second);
-            }
-            else if (pair.first == "age")
-            {
-                std::cout << any_cast<int>(pair.second);
-            }
-        }
-        catch (const std::exception &e)
-        {
-            std::cout << "类型转换错误: " << e.what();
-        }
+        printAny(pair.second);
         std::cout << std::endl;
     }
 
@@ -324,65 +374,7 @@ void testPropertyAccess()
     for (const auto &pair : allValues)
     {
         std::cout << "  " << pair.first << ": ";
-        try
-        {
-            if (pair.first == "name")
-            {
-                std::cout << any_cast<std::string>(pair.second);    
-            }
-            else if (pair.first == "age")
-            {
-                std::cout << any_cast<int>(pair.second);
-            }
-            else if (pair.first == "money")
-            {
-                std::cout << any_cast<float>(pair.second);
-            }
-            else if (pair.first == "height")
-            {
-                std::cout << any_cast<double>(pair.second);
-            }
-            else if (pair.first == "isEmployed")
-            {
-                std::cout << any_cast<bool>(pair.second);
-            }
-            else if (pair.first == "gender")
-            {
-                std::cout << any_cast<char>(pair.second);
-            }
-            else if (pair.first == "id")
-            {
-                std::cout << any_cast<long long>(pair.second);
-            }
-            else if (pair.first == "score")
-            {
-                std::cout << any_cast<unsigned int>(pair.second);
-            }
-            else if (pair.first == "timestamp")
-            {
-                std::cout << any_cast<unsigned long long>(pair.second);
-            }
-            else if (pair.first == "level")
-            {
-                std::cout << any_cast<short int>(pair.second);
-            }
-            else if (pair.first == "rank")
-            {
-                std::cout << any_cast<unsigned short int>(pair.second);
-            }
-            else if (pair.first == "grade")
-            {
-                std::cout << static_cast<int>(any_cast<signed char>(pair.second));
-            }
-            else if (pair.first == "status")
-            {
-                std::cout << static_cast<int>(any_cast<unsigned char>(pair.second));
-            }
-        }
-        catch (const std::exception &e)
-        {
-            std::cout << "类型转换错误: " << e.what();
-        }
+        printAny(pair.second);
         std::cout << std::endl;
     }
 }
@@ -509,8 +501,7 @@ void testConstMemberAccess()
     {
         // 获取const成员变量值（保持const限定）
         Any constValue = registry.getValues("Person", "constantValue", &person);
-        auto constVal = any_cast<const int>(constValue);
-        constVal += 10; // 更新constVal以反映修改后的值
+        const int constVal = any_cast<const int>(constValue);
         std::cout << "✓ constantValue: " << constVal << std::endl;
 
         auto setter = registry.getSetter("Person", "constantValue");
@@ -600,12 +591,12 @@ int main()
         std::cout << "✓ 反射信息注册完成" << std::endl;
 
         // 执行各项测试
-        // testObjectCreation();
-        // testPropertyAccess();
-        // testMethodInvocation();
-        // testErrorHandling();
-        // testConstMemberAccess();
-        // testConstMethodInvocation();
+        testObjectCreation();
+        testPropertyAccess();
+        testMethodInvocation();
+        testErrorHandling();
+        testConstMemberAccess();
+        testConstMethodInvocation();
 
 
         std::cout << "\n=== 所有测试完成 ===" << std::endl;

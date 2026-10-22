@@ -1,31 +1,47 @@
-cmake_minimum_required(VERSION 3.5)
-## Prefer GCC/G++ when available.
-# NOTE: CMake picks the compiler at configure time. Setting these variables here
-# will only take effect if CMake hasn't already chosen a compiler (or if the
-# cache is cleared). If your `build/` directory already has a CMake cache
-# configured for MSVC, delete `build/CMakeCache.txt` (or remove `build/`) and
-# re-run CMake to pick up GCC.
-if(NOT DEFINED CMAKE_C_COMPILER)
-    set(CMAKE_C_COMPILER gcc CACHE PATH "C compiler" FORCE)
-endif()
-if(NOT DEFINED CMAKE_CXX_COMPILER)
-    set(CMAKE_CXX_COMPILER g++ CACHE PATH "C++ compiler" FORCE)
+cmake_minimum_required(VERSION 3.20)
+
+project(EventlyReflection LANGUAGES CXX)
+
+if(MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" CACHE STRING "MSVC runtime library")
 endif()
 
-project(Reflection)
+set(EVENTLY_CXX_STANDARD "11" CACHE STRING "C++ standard: 11, 14, or 17")
+set_property(CACHE EVENTLY_CXX_STANDARD PROPERTY STRINGS 11 14 17)
 
-# 设置C++11标准
-set(CMAKE_CXX_STANDARD 11)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
+function(evently_target_defaults target)
+    set_target_properties(${target} PROPERTIES
+        CXX_STANDARD ${EVENTLY_CXX_STANDARD}
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF
+    )
+    if(MSVC)
+        target_compile_options(${target} PRIVATE /W4 /utf-8 /Zc:__cplusplus)
+    else()
+        target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+endfunction()
 
-# 添加编译选项
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra")
-
-# 添加可执行文件
-add_executable(Test
-    main.cpp
+add_library(evently_reflection STATIC
     Reflection.cpp
 )
+target_include_directories(evently_reflection PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+evently_target_defaults(evently_reflection)
 
-# 包含头文件目录
-target_include_directories(Test PRIVATE .)
+add_executable(Test
+    main.cpp
+)
+target_link_libraries(Test PRIVATE evently_reflection)
+evently_target_defaults(Test)
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(ReflectionTests
+        tests/reflection_tests.cpp
+    )
+    target_link_libraries(ReflectionTests PRIVATE evently_reflection)
+    evently_target_defaults(ReflectionTests)
+    add_test(NAME reflection_tests COMMAND ReflectionTests)
+endif()

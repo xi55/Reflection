@@ -2,11 +2,10 @@
 #define ANY_H
 #pragma once
 
+#include <string>
 #include <typeinfo>
 #include <utility>
 #include <type_traits>
-#include <stdexcept>
-#include <memory>
 
 namespace Evently
 {
@@ -30,7 +29,7 @@ namespace Evently
          */
         template <typename T>
         Any(const T &value)
-            : content_(new Holder<typename std::remove_reference<T>::type>(value)) {}
+            : content_(new Holder<typename std::decay<T>::type>(value)) {}
 
         /// 拷贝构造函数
         Any(const Any &other)
@@ -58,7 +57,12 @@ namespace Evently
         /// 移动赋值操作符
         Any &operator=(Any &&rhs) noexcept
         {
-            rhs.swap(*this);
+            if (this != &rhs)
+            {
+                delete content_;
+                content_ = rhs.content_;
+                rhs.content_ = nullptr;
+            }
             return *this;
         }
 
@@ -94,24 +98,19 @@ namespace Evently
         }
 
         /**
-         * @brief 尝试将存储的值转换为指定类型的指针
-         * @tparam T 目标类型
-         * @return T* 如果类型匹配返回指向值的指针，否则返回nullptr
-         */
-        template <typename T>
-        T *cast()
-        {
-            return content_ ? &static_cast<Holder<T> *>(content_)->held : nullptr;
-        }
-
-        /**
          * @brief 友元函数声明，允许any_cast访问私有成员
          */
         template <typename T>
         friend T any_cast(const Any &operand);
 
         template <typename T>
+        friend T any_cast(Any &operand);
+
+        template <typename T>
         friend T *any_cast(Any *operand);
+
+        template <typename T>
+        friend const T *any_cast(const Any *operand);
 
     private:
         /**
@@ -191,13 +190,36 @@ namespace Evently
     template <typename T>
     T any_cast(const Any &operand)
     {
-        // std::cout << "any_cast目标类型: " << typeid(T).name() << ", 存储类型: " << operand.type().name() << std::endl;
-        if (operand.type() != typeid(T))
+        static_assert(!std::is_lvalue_reference<T>::value ||
+                          std::is_const<typename std::remove_reference<T>::type>::value,
+                      "any_cast<T&>(const Any&) is not allowed");
+        static_assert(!std::is_rvalue_reference<T>::value,
+                      "any_cast<T&&> is not supported");
+        typedef typename std::decay<T>::type U;
+        if (operand.type() != typeid(U))
         {
-            std::string errMsg = "bad any cast from " + std::string(operand.type().name()) + " to " + std::string(typeid(T).name());
-            throw bad_any_cast(errMsg);
+            throw bad_any_cast("bad any cast from " +
+                               std::string(operand.type().name()) + " to " +
+                               std::string(typeid(U).name()));
         }
-        return static_cast<const Any::Holder<T> *>(operand.content_)->held;
+        const U &value = static_cast<const Any::Holder<U> *>(operand.content_)->held;
+        return static_cast<T>(value);
+    }
+
+    template <typename T>
+    T any_cast(Any &operand)
+    {
+        static_assert(!std::is_rvalue_reference<T>::value,
+                      "any_cast<T&&> is not supported");
+        typedef typename std::decay<T>::type U;
+        if (operand.type() != typeid(U))
+        {
+            throw bad_any_cast("bad any cast from " +
+                               std::string(operand.type().name()) + " to " +
+                               std::string(typeid(U).name()));
+        }
+        return static_cast<T>(
+            static_cast<Any::Holder<U> *>(operand.content_)->held);
     }
 
     /**
@@ -209,7 +231,31 @@ namespace Evently
     template <typename T>
     T *any_cast(Any *operand)
     {
-        return operand ? operand->cast<T>() : nullptr;
+        static_assert(!std::is_reference<T>::value,
+                      "any_cast pointer form requires a non-reference type");
+        typedef typename std::remove_cv<T>::type U;
+        if (!operand || operand->type() != typeid(U))
+        {
+            return nullptr;
+        }
+        Any::Holder<U> *holder =
+            static_cast<Any::Holder<U> *>(operand->content_);
+        return &holder->held;
+    }
+
+    template <typename T>
+    const T *any_cast(const Any *operand)
+    {
+        static_assert(!std::is_reference<T>::value,
+                      "any_cast pointer form requires a non-reference type");
+        typedef typename std::remove_cv<T>::type U;
+        if (!operand || operand->type() != typeid(U))
+        {
+            return nullptr;
+        }
+        const Any::Holder<U> *holder =
+            static_cast<const Any::Holder<U> *>(operand->content_);
+        return &holder->held;
     }
 
 } // namespace Evently

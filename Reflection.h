@@ -4,14 +4,17 @@
 
 #include "Any.h"
 #include "IndexSequence.h"
+#include <cstddef>
 #include <string>
 #include <unordered_map>
 #include <memory>
 #include <set>
 #include <vector>
-#include <iostream>
-#include <cxxabi.h>
+#include <stdexcept>
+#include <tuple>
 #include <type_traits>
+#include <typeindex>
+#include <utility>
 
 namespace Evently
 {
@@ -77,6 +80,9 @@ namespace Evently
 
     private:
         FieldType T::*field_;
+
+        void setImpl(void *instance, const Any &value, std::true_type);
+        void setImpl(void *instance, const Any &value, std::false_type);
     };
 
     /**
@@ -134,15 +140,19 @@ namespace Evently
     private:
         MethodType method_;
 
-    template <std::size_t... Indexes>
-    Any invokeImpl(const T *obj, const std::vector<Any> &args,
-               index_sequence<Indexes...>) const;
+        template <std::size_t... Indexes>
+        Any invokeImpl(const T *obj, const std::vector<Any> &args,
+                       index_sequence<Indexes...>, std::false_type) const;
+
+        template <std::size_t... Indexes>
+        Any invokeImpl(const T *obj, const std::vector<Any> &args,
+                       index_sequence<Indexes...>, std::true_type) const;
     };
 
     /**
      * @brief 默认构造对象工厂实现
      */
-    template <typename T, typename... Args>
+    template <typename T>
     class ObjectFactoryImpl : public ObjectFactory
     {
     public:
@@ -184,6 +194,18 @@ namespace Evently
         std::tuple<Args...> args_;
     };
 
+    template <typename T, typename... Args>
+    struct ObjectFactorySelector
+    {
+        typedef ObjectFactoryWithParamImpl<T, Args...> type;
+    };
+
+    template <typename T>
+    struct ObjectFactorySelector<T>
+    {
+        typedef ObjectFactoryImpl<T> type;
+    };
+
     /**
      * @brief 反射注册表类（单例模式）
      */
@@ -217,16 +239,16 @@ namespace Evently
         template <typename T, typename... Args>
         void registerClass(const std::string &className, Args... args)
         {
-            if (sizeof...(args) == 0)
+            static_assert(sizeof...(Args) != 0 || std::is_default_constructible<T>::value,
+                          "default-constructed registration requires a default constructor");
+            if (className.empty())
             {
-                factories_[className] = std::unique_ptr<ObjectFactory>(new ObjectFactoryImpl<T>());
+                throw std::invalid_argument("类名不能为空");
             }
-            else
-            {
-                factories_[className] = std::unique_ptr<ObjectFactory>(
-                    new ObjectFactoryWithParamImpl<T, typename std::decay<Args>::type...>(
-                        std::forward<Args>(args)...));
-            }
+            factories_[className] = std::unique_ptr<ObjectFactory>(
+                new typename ObjectFactorySelector<
+                    T, typename std::decay<Args>::type...>::type(
+                    std::forward<Args>(args)...));
         }
 
         template <typename... Args>
@@ -277,7 +299,7 @@ namespace Evently
             setterWritable_;
 
         std::unordered_map<std::string, std::set<std::string>> methodNames_;
-        std::unordered_map<std::string, std::string> classNames_;
+        std::unordered_map<std::type_index, std::string> classNames_;
         std::unordered_map<std::string, std::unique_ptr<ObjectFactory>> factories_;
     };
 
@@ -286,6 +308,11 @@ namespace Evently
     template <typename ParamType>
     static ParamType getParam(const Any &arg)
     {
+        static_assert(!std::is_lvalue_reference<ParamType>::value ||
+                          std::is_const<typename std::remove_reference<ParamType>::type>::value,
+                      "non-const reference parameters are not supported");
+        static_assert(!std::is_rvalue_reference<ParamType>::value,
+                      "rvalue reference parameters are not supported");
         return any_cast<ParamType>(arg);
     }
 
@@ -311,16 +338,7 @@ namespace Evently
     inline Any MethodInvoker<T, ReturnType, Args...>::invokeImpl(
         T *obj, const std::vector<Any> &args, index_sequence<Indexes...>) const
     {
-
-        try
-        {
-            return Any((obj->*method_)(getParam<Args>(args[Indexes])...));
-        }
-        catch (const bad_any_cast &e)
-        {
-            std::cerr << "参数类型转换失败: " << e.what() << "\n";
-            throw;
-        }
+        return Any((obj->*method_)(getParam<Args>(args[Indexes])...));
     }
 
     // void返回类型的特化实现
@@ -345,41 +363,27 @@ namespace Evently
     inline Any MethodInvoker<T, void, Args...>::invokeImpl(
         T *obj, const std::vector<Any> &args, index_sequence<Indexes...>) const
     {
-
-        try
-        {
-            (obj->*method_)(getParam<Args>(args[Indexes])...);
-            return Any();
-        }
-        catch (const bad_any_cast &e)
-        {
-            std::cerr << "参数类型转换失败: " << e.what() << "\n";
-            throw;
-        }
+        (obj->*method_)(getParam<Args>(args[Indexes])...);
+        return Any();
     }
 
     template <typename T, typename ReturnType, typename... Args>
     template <std::size_t... Indexes>
     inline Any ConstMethodInvoker<T, ReturnType, Args...>::invokeImpl(
-        const T *obj, const std::vector<Any> &args, index_sequence<Indexes...>) const
+        const T *obj, const std::vector<Any> &args, index_sequence<Indexes...>,
+        std::false_type) const
     {
-        try
-        {
-            if constexpr (!std::is_void<ReturnType>::value)
-            {
-                return Any((obj->*method_)(getParam<Args>(args[Indexes])...));
-            }
-            else
-            {
-                (obj->*method_)(getParam<Args>(args[Indexes])...);
-                return Any();
-            }
-        }
-        catch (const bad_any_cast &e)
-        {
-            std::cerr << "参数类型转换失败: " << e.what() << "\n";
-            throw;
-        }
+        return Any((obj->*method_)(getParam<Args>(args[Indexes])...));
+    }
+
+    template <typename T, typename ReturnType, typename... Args>
+    template <std::size_t... Indexes>
+    inline Any ConstMethodInvoker<T, ReturnType, Args...>::invokeImpl(
+        const T *obj, const std::vector<Any> &args, index_sequence<Indexes...>,
+        std::true_type) const
+    {
+        (obj->*method_)(getParam<Args>(args[Indexes])...);
+        return Any();
     }
 
     // PropertySetter 实现
@@ -389,28 +393,42 @@ namespace Evently
     template <typename T, typename FieldType>
     void PropertySetter<T, FieldType>::set(void *instance, const Any &value)
     {
-        T *obj = static_cast<T *>(instance);
+        setImpl(instance, value,
+                std::integral_constant<bool, std::is_const<FieldType>::value>{});
+    }
 
-        if constexpr (std::is_const<FieldType>::value)
+    template <typename T, typename FieldType>
+    void PropertySetter<T, FieldType>::setImpl(void *, const Any &, std::true_type)
+    {
+        throw std::invalid_argument("PropertySetter: Cannot set value of const field");
+    }
+
+    template <typename T, typename FieldType>
+    void PropertySetter<T, FieldType>::setImpl(void *instance, const Any &value,
+                                               std::false_type)
+    {
+        if (instance == nullptr)
         {
-            throw std::invalid_argument("PropertySetter: Cannot set value of const field");
+            throw std::invalid_argument("实例指针不能为空");
         }
-        else
+        T *obj = static_cast<T *>(instance);
+        try
         {
-            try
-            {
-                obj->*field_ = any_cast<FieldType>(value);
-            }
-            catch (const bad_any_cast &)
-            {
-                throw std::invalid_argument("PropertySetter: Invalid type for field");
-            }
+            obj->*field_ = any_cast<FieldType>(value);
+        }
+        catch (const bad_any_cast &)
+        {
+            throw std::invalid_argument("PropertySetter: Invalid type for field");
         }
     }
 
     template <typename T, typename FieldType>
     Any PropertySetter<T, FieldType>::get(const void *instance) const
     {
+        if (instance == nullptr)
+        {
+            throw std::invalid_argument("实例指针不能为空");
+        }
         const T *obj = static_cast<const T *>(instance);
         return Any(obj->*field_);
     }
@@ -419,13 +437,17 @@ namespace Evently
     template <typename T>
     void ReflectionRegistry::registerClassName(const std::string &className)
     {
-        classNames_[typeid(T).name()] = className;
+        if (className.empty())
+        {
+            throw std::invalid_argument("类名不能为空");
+        }
+        classNames_[std::type_index(typeid(T))] = className;
     }
 
     template <typename T>
     std::string ReflectionRegistry::getClassName() const
     {
-        auto it = classNames_.find(typeid(T).name());
+        auto it = classNames_.find(std::type_index(typeid(T)));
         return it != classNames_.end() ? it->second : "unregistered";
     }
 
@@ -434,6 +456,10 @@ namespace Evently
                                             const std::string &methodName,
                                             ReturnType (T::*method)(Args...))
     {
+        if (className.empty() || methodName.empty())
+        {
+            throw std::invalid_argument("类名和方法名不能为空");
+        }
         auto key = std::make_pair(className, methodName);
 
         methods_[key] = std::unique_ptr<MethodInvokerBase>(
@@ -446,6 +472,10 @@ namespace Evently
                                             const std::string &methodName,
                                             ReturnType (T::*method)())
     {
+        if (className.empty() || methodName.empty())
+        {
+            throw std::invalid_argument("类名和方法名不能为空");
+        }
         auto key = std::make_pair(className, methodName);
         methods_[key] = std::unique_ptr<MethodInvokerBase>(
             new MethodInvoker<T, ReturnType>(method));
@@ -457,6 +487,10 @@ namespace Evently
                                             const std::string &methodName,
                                             ReturnType (T::*method)(Args...) const)
     {
+        if (className.empty() || methodName.empty())
+        {
+            throw std::invalid_argument("类名和方法名不能为空");
+        }
         auto key = std::make_pair(className, methodName);
         methods_[key] = std::unique_ptr<MethodInvokerBase>(
             new ConstMethodInvoker<T, ReturnType, Args...>(method));
@@ -468,6 +502,10 @@ namespace Evently
                                            const std::string &fieldName,
                                            FieldType T::*field)
     {
+        if (className.empty() || fieldName.empty())
+        {
+            throw std::invalid_argument("类名和字段名不能为空");
+        }
         auto key = std::make_pair(className, fieldName);
         setterWritable_[key] = !std::is_const<FieldType>::value;
         setters_[key] = std::unique_ptr<PropertySetterBase>(
@@ -478,7 +516,16 @@ namespace Evently
     void ReflectionRegistry::registerField(const std::string &fieldName,
                                            FieldType T::*field)
     {
-        auto key = std::make_pair(classNames_[typeid(T).name()], fieldName);
+        if (fieldName.empty())
+        {
+            throw std::invalid_argument("字段名不能为空");
+        }
+        auto it = classNames_.find(std::type_index(typeid(T)));
+        if (it == classNames_.end())
+        {
+            throw std::runtime_error("类未注册，无法注册字段: " + fieldName);
+        }
+        auto key = std::make_pair(it->second, fieldName);
         setterWritable_[key] = !std::is_const<FieldType>::value;
         setters_[key] = std::unique_ptr<PropertySetterBase>(
             new PropertySetter<T, FieldType>(field));
@@ -494,7 +541,8 @@ namespace Evently
         if (args.size() != sizeof...(Args))
             throw std::invalid_argument("参数数量不匹配");
         const T *obj = static_cast<const T *>(instance);
-        return invokeImpl(obj, args, typename index_sequence_for<Args...>::type{});
+        return invokeImpl(obj, args, typename index_sequence_for<Args...>::type{},
+                          std::integral_constant<bool, std::is_void<ReturnType>::value>{});
     }
 }
 
