@@ -23,7 +23,7 @@ int main()
         return 1;
     }
 
-    Evently::PropertySetterBase *setter =
+    std::shared_ptr<Evently::PropertySetterBase> setter =
         registry.getSetter("ConsumerType", "value");
     setter->set(value, Evently::Any(7));
     return value->value_ == 7 ? 0 : 2;

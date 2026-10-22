@@ -190,6 +190,12 @@ namespace
         int value_;
     };
 
+    class DynamicObject
+    {
+    public:
+        int value_ = 0;
+    };
+
     EVENTLY_REGISTER_CLASS(AutoObject, "AutoObject")
     {
         Evently::ClassRegistration<AutoObject> registration("AutoObject");
@@ -391,7 +397,7 @@ namespace
     void checkField(ReflectionRegistry &registry, TestObject &object,
                     const std::string &name, const T &value, const T &expected)
     {
-        PropertySetterBase *setter = registry.getSetter("TestObject", name);
+        std::shared_ptr<PropertySetterBase> setter = registry.getSetter("TestObject", name);
         CHECK(setter != nullptr);
         if (!setter)
         {
@@ -451,7 +457,7 @@ namespace
         CHECK_ERROR(ReflectionErrorCode::FieldNotFound,
                     (registry.getSetter("TestObject", "missing")));
 
-        PropertySetterBase *setter = registry.getSetter("TestObject", "value");
+        std::shared_ptr<PropertySetterBase> setter = registry.getSetter("TestObject", "value");
         CHECK(setter != nullptr);
         if (setter)
         {
@@ -894,7 +900,7 @@ namespace
         AutoObject *value = object.get<AutoObject>();
         CHECK(value != nullptr);
 
-        PropertySetterBase *setter = registry.getSetter("AutoObject", "value");
+        std::shared_ptr<PropertySetterBase> setter = registry.getSetter("AutoObject", "value");
         CHECK(setter != nullptr);
         if (value != nullptr && setter != nullptr)
         {
@@ -997,23 +1003,22 @@ namespace
         registry.freeze();
         CHECK(registry.isFrozen());
 
-        CHECK_ERROR(ReflectionErrorCode::RegistryFrozen,
-                    (registry.registerClass<NoDefault, int>(
-                        "NoDefaultFrozen", 1)));
-        CHECK_ERROR(ReflectionErrorCode::RegistryFrozen,
-                    (registry.registerField<TestObject>(
-                        "TestObject", "frozenField", &TestObject::value_)));
-        CHECK_ERROR(ReflectionErrorCode::RegistryFrozen,
-                    (registry.registerMethod<TestObject, int, int, int>(
-                        "TestObject", "frozenMethod", &TestObject::add)));
-        CHECK_ERROR(ReflectionErrorCode::RegistryFrozen,
-                    (registry.registerClassName<NoDefault>("NoDefaultFrozenName")));
+        registry.registerClassName<DynamicObject>("DynamicObject");
+        registry.registerField<DynamicObject>("DynamicObject", "value",
+                                              &DynamicObject::value_);
+        registry.registerConstructor<DynamicObject>("DynamicObject");
+        CHECK(registry.hasClass("DynamicObject"));
+        CHECK(registry.hasField("DynamicObject", "value"));
+        CHECK(registry.getConstructors("DynamicObject").size() == 1u);
+
+        ObjectHandle dynamic = registry.createInstance("DynamicObject");
+        CHECK(dynamic.get<DynamicObject>() != nullptr);
 
         std::atomic<int> errors(0);
-        std::vector<std::thread> threads;
+        std::vector<std::thread> readers;
         for (int threadIndex = 0; threadIndex < 4; ++threadIndex)
         {
-            threads.push_back(std::thread([&registry, &object, &errors]() {
+            readers.push_back(std::thread([&registry, &object, &errors]() {
                 try
                 {
                     for (int index = 0; index < 500; ++index)
@@ -1042,6 +1047,10 @@ namespace
                         {
                             ++errors;
                         }
+                        if (!registry.hasClass("DynamicObject"))
+                        {
+                            ++errors;
+                        }
                     }
                 }
                 catch (...)
@@ -1050,11 +1059,35 @@ namespace
                 }
             }));
         }
-        for (std::size_t index = 0; index < threads.size(); ++index)
+
+        std::thread writer([&registry, &errors]() {
+            try
+            {
+                for (int index = 0; index < 200; ++index)
+                {
+                    const std::string name =
+                        std::string("DynamicAlias") + std::to_string(index);
+                    registry.registerClass<DynamicObject>(name);
+                    registry.registerField<DynamicObject>(
+                        name, "value", &DynamicObject::value_);
+                }
+            }
+            catch (...)
+            {
+                ++errors;
+            }
+        });
+
+        writer.join();
+        for (std::size_t index = 0; index < readers.size(); ++index)
         {
-            threads[index].join();
+            readers[index].join();
         }
         CHECK(errors.load() == 0);
+        CHECK(registry.hasClass("DynamicAlias199"));
+        CHECK(registry.hasField("DynamicAlias199", "value"));
+        ObjectHandle late = registry.createInstance("DynamicAlias199");
+        CHECK(late.get<DynamicObject>() != nullptr);
     }
 
     struct TestCase

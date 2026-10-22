@@ -1,14 +1,15 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(EventlyReflection VERSION 3.2.0 LANGUAGES CXX)
+project(EventlyReflection VERSION 4.0.0 LANGUAGES CXX)
 
-if(MSVC)
+if(MSVC AND NOT BUILD_SHARED_LIBS)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" CACHE STRING "MSVC runtime library")
 endif()
 
 set(EVENTLY_CXX_STANDARD "11" CACHE STRING "C++ standard: 11, 14, or 17")
 set_property(CACHE EVENTLY_CXX_STANDARD PROPERTY STRINGS 11 14 17)
 option(EVENTLY_BUILD_EXAMPLES "Build example programs" ON)
+option(EVENTLY_BUILD_DOCS "Build Doxygen documentation" OFF)
 
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
@@ -21,12 +22,15 @@ function(evently_target_defaults target)
     )
     if(MSVC)
         target_compile_options(${target} PRIVATE /W4 /utf-8 /Zc:__cplusplus)
+        if(BUILD_SHARED_LIBS)
+            target_compile_options(${target} PRIVATE /wd4251)
+        endif()
     else()
         target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
     endif()
 endfunction()
 
-add_library(evently_reflection STATIC
+add_library(evently_reflection
     Reflection.cpp
 )
 add_library(Evently::Reflection ALIAS evently_reflection)
@@ -38,6 +42,10 @@ target_include_directories(evently_reflection PUBLIC
 target_compile_features(evently_reflection PUBLIC cxx_std_11)
 if(MSVC)
     target_compile_options(evently_reflection INTERFACE /utf-8)
+endif()
+if(BUILD_SHARED_LIBS)
+    target_compile_definitions(evently_reflection PRIVATE EVENTLY_BUILDING_LIBRARY)
+    target_compile_definitions(evently_reflection PUBLIC EVENTLY_SHARED)
 endif()
 evently_target_defaults(evently_reflection)
 
@@ -70,6 +78,20 @@ if(BUILD_TESTING)
     endif()
 endif()
 
+if(EVENTLY_BUILD_DOCS)
+    find_package(Doxygen REQUIRED)
+    configure_file(
+        ${CMAKE_CURRENT_SOURCE_DIR}/docs/Doxyfile.in
+        ${CMAKE_CURRENT_BINARY_DIR}/Doxyfile
+        @ONLY
+    )
+    add_custom_target(docs
+        COMMAND ${DOXYGEN_EXECUTABLE} ${CMAKE_CURRENT_BINARY_DIR}/Doxyfile
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        COMMENT "Generating Evently API documentation"
+    )
+endif()
+
 install(TARGETS evently_reflection
     EXPORT EventlyTargets
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
@@ -80,6 +102,7 @@ install(TARGETS evently_reflection
 
 install(FILES
     Any.h
+    EventlyExport.h
     IndexSequence.h
     ObjectHandle.h
     ReflectionError.h

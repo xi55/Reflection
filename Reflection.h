@@ -3,6 +3,7 @@
 #pragma once
 
 #include "Any.h"
+#include "EventlyExport.h"
 #include "IndexSequence.h"
 #include "ObjectHandle.h"
 #include "ReflectionError.h"
@@ -105,15 +106,15 @@ namespace Evently
     {
     public:
         virtual ~ObjectFactory() {}
-        virtual ObjectHandle create() = 0;
+        virtual ObjectHandle create() const = 0;
     };
 
-    struct PairHash
+    struct EVENTLY_API PairHash
     {
         std::size_t operator()(const std::pair<std::string, std::string> &pair) const;
     };
 
-    struct PairEqual
+    struct EVENTLY_API PairEqual
     {
         bool operator()(const std::pair<std::string, std::string> &lhs,
                         const std::pair<std::string, std::string> &rhs) const;
@@ -487,7 +488,7 @@ namespace Evently
     class ObjectFactoryImpl : public ObjectFactory
     {
     public:
-        ObjectHandle create() override
+        ObjectHandle create() const override
         {
             return ObjectHandle::create<T>();
         }
@@ -500,14 +501,14 @@ namespace Evently
         explicit ObjectFactoryWithParamImpl(Args... args)
             : args_(std::make_tuple(std::forward<Args>(args)...)) {}
 
-        ObjectHandle create() override
+        ObjectHandle create() const override
         {
             return createImpl(typename index_sequence_for<Args...>::type{});
         }
 
     private:
         template <std::size_t... Is>
-        ObjectHandle createImpl(index_sequence<Is...>)
+        ObjectHandle createImpl(index_sequence<Is...>) const
         {
             return ObjectHandle::create<T>(std::get<Is>(args_)...);
         }
@@ -533,7 +534,7 @@ namespace Evently
         {
         };
 
-        class RegistrationQueue
+        class EVENTLY_API RegistrationQueue
         {
         public:
             static RegistrationQueue &getInstance();
@@ -556,7 +557,7 @@ namespace Evently
         };
     }
 
-    class ReflectionRegistry
+    class EVENTLY_API ReflectionRegistry
     {
     public:
         static ReflectionRegistry &getInstance();
@@ -625,7 +626,7 @@ namespace Evently
             static_assert(sizeof...(Args) != 0 || std::is_default_constructible<T>::value,
                           "default-constructed registration requires a default constructor");
             addFactory(std::type_index(typeid(T)), className,
-                       std::unique_ptr<ObjectFactory>(
+                       std::shared_ptr<ObjectFactory>(
                            new typename ObjectFactorySelector<
                                T, typename std::decay<Args>::type...>::type(
                                std::forward<Args>(args)...)));
@@ -635,7 +636,7 @@ namespace Evently
         void registerConstructor(const std::string &className)
         {
             addConstructor(std::type_index(typeid(T)), className,
-                           std::unique_ptr<ConstructorInvokerBase>(
+                           std::shared_ptr<ConstructorInvokerBase>(
                                new ConstructorInvoker<T, Args...>()));
         }
 
@@ -664,8 +665,8 @@ namespace Evently
         bool isFieldWritable(const std::string &className,
                              const std::string &fieldName) const;
 
-        PropertySetterBase *getSetter(const std::string &className,
-                                      const std::string &fieldName) const;
+        std::shared_ptr<PropertySetterBase> getSetter(
+            const std::string &className, const std::string &fieldName) const;
 
         std::unordered_map<std::string, Any> getAllValues(const std::string &className,
                                                           const void *instance) const;
@@ -714,51 +715,61 @@ namespace Evently
         ReflectionRegistry(const ReflectionRegistry &) = delete;
         ReflectionRegistry &operator=(const ReflectionRegistry &) = delete;
 
-        std::unique_lock<std::mutex> readLock() const;
-        void ensureMutableLocked() const;
-        void ensureClassLocked(const std::string &className);
-        void checkClassNameOwnerLocked(const std::type_index &type,
-                                       const std::string &className);
+        struct RegistryData
+        {
+            std::unordered_map<std::pair<std::string, std::string>,
+                               std::shared_ptr<PropertySetterBase>,
+                               PairHash, PairEqual>
+                setters;
+
+            std::unordered_map<std::pair<std::string, std::string>,
+                               std::vector<std::shared_ptr<MethodInvokerBase>>,
+                               PairHash, PairEqual>
+                methods;
+
+            std::unordered_map<
+                std::string,
+                std::vector<std::shared_ptr<ConstructorInvokerBase>>>
+                constructors;
+
+            std::unordered_map<std::string, std::set<std::string>> methodNames;
+            std::unordered_map<std::type_index, std::string> classNames;
+            std::unordered_map<std::string, std::type_index> classNameOwners;
+            std::set<std::string> classNamesSet;
+            std::unordered_map<std::string, std::shared_ptr<ObjectFactory>>
+                factories;
+        };
+
+        std::shared_ptr<const RegistryData> snapshot() const;
+        std::shared_ptr<RegistryData> copyData() const;
+        void publish(const std::shared_ptr<RegistryData> &data);
+
+        static void ensureClass(RegistryData &data,
+                                const std::string &className);
+        static void checkClassNameOwner(RegistryData &data,
+                                        const std::type_index &type,
+                                        const std::string &className);
 
         void addClassName(const std::type_index &type, const std::string &className);
         void addField(const std::type_index &type, const std::string &className,
                       const std::string &fieldName,
-                      std::unique_ptr<PropertySetterBase> setter);
+                      std::shared_ptr<PropertySetterBase> setter);
         void addMethod(const std::type_index &type, const std::string &className,
                        const std::string &methodName,
-                       std::unique_ptr<MethodInvokerBase> invoker);
+                       std::shared_ptr<MethodInvokerBase> invoker);
         void addConstructor(const std::type_index &type, const std::string &className,
-                            std::unique_ptr<ConstructorInvokerBase> constructor);
+                            std::shared_ptr<ConstructorInvokerBase> constructor);
         void addFactory(const std::type_index &type, const std::string &className,
-                        std::unique_ptr<ObjectFactory> factory);
+                        std::shared_ptr<ObjectFactory> factory);
 
         Any invokeMethodImpl(const std::string &className,
                              const std::string &methodName,
                              const void *instance, InstanceKind kind,
                              const std::vector<Any> &args) const;
 
-        mutable std::mutex mutex_;
+        std::shared_ptr<const RegistryData> data_;
+        std::mutex writeMutex_;
         std::atomic<bool> frozen_;
-
-        std::unordered_map<std::pair<std::string, std::string>,
-                           std::unique_ptr<PropertySetterBase>,
-                           PairHash, PairEqual>
-            setters_;
-
-        std::unordered_map<std::pair<std::string, std::string>,
-                           std::vector<std::unique_ptr<MethodInvokerBase>>,
-                           PairHash, PairEqual>
-            methods_;
-
-        std::unordered_map<std::string,
-                           std::vector<std::unique_ptr<ConstructorInvokerBase>>>
-            constructors_;
-
-        std::unordered_map<std::string, std::set<std::string>> methodNames_;
-        std::unordered_map<std::type_index, std::string> classNames_;
-        std::unordered_map<std::string, std::type_index> classNameOwners_;
-        std::set<std::string> classNamesSet_;
-        std::unordered_map<std::string, std::unique_ptr<ObjectFactory>> factories_;
     };
 
     template <typename T>
@@ -902,9 +913,9 @@ namespace Evently
     template <typename T>
     std::string ReflectionRegistry::getClassName() const
     {
-        std::unique_lock<std::mutex> lock = readLock();
-        auto it = classNames_.find(std::type_index(typeid(T)));
-        if (it == classNames_.end())
+        std::shared_ptr<const RegistryData> data = snapshot();
+        auto it = data->classNames.find(std::type_index(typeid(T)));
+        if (it == data->classNames.end())
         {
             throw ReflectionError(ReflectionErrorCode::ClassNotFound,
                                   "类未注册");
@@ -915,8 +926,9 @@ namespace Evently
     template <typename T>
     bool ReflectionRegistry::hasClassName() const
     {
-        std::unique_lock<std::mutex> lock = readLock();
-        return classNames_.find(std::type_index(typeid(T))) != classNames_.end();
+        std::shared_ptr<const RegistryData> data = snapshot();
+        return data->classNames.find(std::type_index(typeid(T))) !=
+               data->classNames.end();
     }
 
     template <typename T, typename ReturnType, typename... Args>
@@ -925,7 +937,7 @@ namespace Evently
                                             ReturnType (T::*method)(Args...))
     {
         addMethod(std::type_index(typeid(T)), className, methodName,
-                  std::unique_ptr<MethodInvokerBase>(
+                  std::shared_ptr<MethodInvokerBase>(
                       new MethodInvoker<T, ReturnType, Args...>(method)));
     }
 
@@ -935,7 +947,7 @@ namespace Evently
                                             ReturnType (T::*method)())
     {
         addMethod(std::type_index(typeid(T)), className, methodName,
-                  std::unique_ptr<MethodInvokerBase>(
+                  std::shared_ptr<MethodInvokerBase>(
                       new MethodInvoker<T, ReturnType>(method)));
     }
 
@@ -945,7 +957,7 @@ namespace Evently
                                             ReturnType (T::*method)(Args...) const)
     {
         addMethod(std::type_index(typeid(T)), className, methodName,
-                  std::unique_ptr<MethodInvokerBase>(
+                  std::shared_ptr<MethodInvokerBase>(
                       new ConstMethodInvoker<T, ReturnType, Args...>(method)));
     }
 
@@ -955,7 +967,7 @@ namespace Evently
                                             ReturnType (T::*method)(Args...) &)
     {
         addMethod(std::type_index(typeid(T)), className, methodName,
-                  std::unique_ptr<MethodInvokerBase>(
+                  std::shared_ptr<MethodInvokerBase>(
                       new LValueMethodInvoker<T, ReturnType, Args...>(method)));
     }
 
@@ -965,7 +977,7 @@ namespace Evently
                                             ReturnType (T::*method)(Args...) const &)
     {
         addMethod(std::type_index(typeid(T)), className, methodName,
-                  std::unique_ptr<MethodInvokerBase>(
+                  std::shared_ptr<MethodInvokerBase>(
                       new ConstLValueMethodInvoker<T, ReturnType, Args...>(method)));
     }
 
@@ -975,7 +987,7 @@ namespace Evently
                                             ReturnType (T::*method)(Args...) &&)
     {
         addMethod(std::type_index(typeid(T)), className, methodName,
-                  std::unique_ptr<MethodInvokerBase>(
+                  std::shared_ptr<MethodInvokerBase>(
                       new RValueMethodInvoker<T, ReturnType, Args...>(method)));
     }
 
@@ -985,7 +997,7 @@ namespace Evently
                                             ReturnType (T::*method)(Args...) const &&)
     {
         addMethod(std::type_index(typeid(T)), className, methodName,
-                  std::unique_ptr<MethodInvokerBase>(
+                  std::shared_ptr<MethodInvokerBase>(
                       new ConstRValueMethodInvoker<T, ReturnType, Args...>(method)));
     }
 
@@ -996,7 +1008,7 @@ namespace Evently
                                             ReturnType (T::*method)(Args...) noexcept)
     {
         addMethod(std::type_index(typeid(T)), className, methodName,
-                  std::unique_ptr<MethodInvokerBase>(
+                  std::shared_ptr<MethodInvokerBase>(
                       new NoexceptMethodInvoker<T, ReturnType, Args...>(method)));
     }
 
@@ -1006,7 +1018,7 @@ namespace Evently
                                             ReturnType (T::*method)(Args...) const noexcept)
     {
         addMethod(std::type_index(typeid(T)), className, methodName,
-                  std::unique_ptr<MethodInvokerBase>(
+                  std::shared_ptr<MethodInvokerBase>(
                       new ConstNoexceptMethodInvoker<T, ReturnType, Args...>(method)));
     }
 #endif
@@ -1018,7 +1030,7 @@ namespace Evently
     {
         addMethod(std::type_index(typeid(detail::FreeFunctionTag)),
                   className, functionName,
-                  std::unique_ptr<MethodInvokerBase>(
+                  std::shared_ptr<MethodInvokerBase>(
                       new FunctionInvoker<ReturnType, Args...>(function)));
     }
 
@@ -1028,7 +1040,7 @@ namespace Evently
                                                   ReturnType (*method)(Args...))
     {
         addMethod(std::type_index(typeid(T)), className, methodName,
-                  std::unique_ptr<MethodInvokerBase>(
+                  std::shared_ptr<MethodInvokerBase>(
                       new FunctionInvoker<ReturnType, Args...>(method)));
     }
 
@@ -1038,7 +1050,7 @@ namespace Evently
                                            FieldType T::*field)
     {
         addField(std::type_index(typeid(T)), className, fieldName,
-                 std::unique_ptr<PropertySetterBase>(
+                 std::shared_ptr<PropertySetterBase>(
                      new PropertySetter<T, FieldType>(field)));
     }
 
@@ -1048,9 +1060,9 @@ namespace Evently
     {
         std::string className;
         {
-            std::unique_lock<std::mutex> lock = readLock();
-            auto it = classNames_.find(std::type_index(typeid(T)));
-            if (it == classNames_.end())
+            std::shared_ptr<const RegistryData> data = snapshot();
+            auto it = data->classNames.find(std::type_index(typeid(T)));
+            if (it == data->classNames.end())
             {
                 throw ReflectionError(ReflectionErrorCode::ClassNotFound,
                                       "类未注册，无法注册字段");
@@ -1058,7 +1070,7 @@ namespace Evently
             className = it->second;
         }
         addField(std::type_index(typeid(T)), className, fieldName,
-                 std::unique_ptr<PropertySetterBase>(
+                 std::shared_ptr<PropertySetterBase>(
                      new PropertySetter<T, FieldType>(field)));
     }
 }

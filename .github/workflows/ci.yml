@@ -50,9 +50,52 @@ jobs:
         run: cmake --install build --config Debug --prefix "${{ github.workspace }}/install"
       - name: Consumer
         run: |
-          cmake -S examples/consumer -B consumer-build -DCMAKE_PREFIX_PATH="${{ github.workspace }}/install"
+          cmake -S examples/consumer -B consumer-build -DCMAKE_PREFIX_PATH="${{ github.workspace }}/install" -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDebug
           cmake --build consumer-build --config Debug
           .\consumer-build\Debug\evently_consumer.exe
+
+  shared-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+          -DBUILD_SHARED_LIBS=ON
+          -DEVENTLY_CXX_STANDARD=17
+      - name: Build
+        run: cmake --build build -j
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  shared-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: >
+          cmake -S . -B build
+          -DBUILD_SHARED_LIBS=ON
+          -DEVENTLY_CXX_STANDARD=17
+      - name: Build
+        run: cmake --build build --config Release
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Doxygen
+        run: sudo apt-get update && sudo apt-get install -y doxygen
+      - name: Configure
+        run: >
+          cmake -S . -B build-docs
+          -DEVENTLY_BUILD_DOCS=ON
+          -DEVENTLY_BUILD_EXAMPLES=OFF
+          -DBUILD_TESTING=OFF
+      - name: Build docs
+        run: cmake --build build-docs --target docs
 
   sanitizers:
     runs-on: ubuntu-latest

@@ -15,7 +15,7 @@
 - `ObjectHandle`：基于 `std::shared_ptr` 的类型安全对象句柄
 - 可变参数模板 + 自定义 `index_sequence`：泛型成员方法调用器
 - 类、字段、方法、对象工厂注册，以及字段/方法元数据
-- 初始化后冻结的线程安全模型：冻结后可并发只读访问
+- COW 快照注册中心：读操作无锁，支持运行期动态注册
 
 > 类似于 Java/C# 中的反射系统，是构建脚本系统、插件系统、序列化框架、可视化编辑器等的基础组件。
 
@@ -36,7 +36,8 @@
 - ✅ 基于字段元数据的 JSON 序列化示例
 - ✅ `Any` 小对象内联存储、move、`has_value`/`reset`/`emplace`
 - ✅ const 实例只能调用 const 方法
-- ✅ 初始化后 `freeze()`，之后可并发只读访问
+- ✅ COW 快照：`freeze()` 后仍可动态注册，读操作无锁
+- ✅ 静态库/共享库构建（`BUILD_SHARED_LIBS`）
 - ✅ CMake install/export，支持 `find_package(Evently CONFIG REQUIRED)`
 - ✅ C++11/C++17、GCC/MSVC、CTest 与 CI
 
@@ -50,6 +51,7 @@ Reflection/
 ├── IndexSequence.h       # C++11 兼容的 index_sequence 实现
 ├── ObjectHandle.h        # 类型安全对象句柄
 ├── ReflectionError.h     # 统一错误码与 ReflectionError
+├── EventlyExport.h       # 共享库导出宏
 ├── Reflection.h          # 反射系统核心类与接口定义
 ├── Reflection.cpp        # 注册中心、哈希与查询实现
 ├── main.cpp              # 使用示例/演示程序
@@ -58,7 +60,8 @@ Reflection/
 ├── examples/json_serialization.cpp # 字段元数据 JSON 序列化示例
 ├── scripts/build-msvc.ps1      # Windows/MSVC + Windows SDK 构建脚本
 ├── cmake/EventlyConfig.cmake.in # CMake package 配置模板
-├── .github/workflows/ci.yml    # Linux/Windows/消毒器 CI
+├── docs/Doxyfile.in            # Doxygen 配置模板
+├── .github/workflows/ci.yml    # Linux/Windows/共享库/消毒器/文档 CI
 ├── CMakeLists.txt        # CMake 构建与安装配置
 ├── LICENSE               # MIT 许可证
 └── README.md             # 项目文档
@@ -79,7 +82,7 @@ Reflection/
 - ✅ 自定义 Any 类型擦除系统，修正 cv/引用转换
 - ✅ void 返回类型方法的正确处理
 - ✅ 类型安全 `ObjectHandle`、统一错误码与元数据查询
-- ✅ 方法重载、const 实例调用、冻结后并发只读
+- ✅ 方法重载、const 实例调用、COW 并发读写
 - ✅ `noexcept`、完整 ref-qualified、静态/自由函数、运行期构造函数
 - ✅ 自动注册队列、JSON 序列化示例、`Any` 小对象优化
 - ✅ install/export、CI 与 250+ 项断言的回归测试
@@ -87,6 +90,16 @@ Reflection/
 ---
 
 ## 📅 更新日志
+
+### v4.0.0 - COW、共享库与文档 (2026-10-22)
+
+- 注册中心改为 COW 快照：读取无锁，`freeze()` 后仍支持运行期动态注册
+- 注册表值改为 `shared_ptr`，`getSetter` 返回 `std::shared_ptr<PropertySetterBase>`
+- 新增 `BUILD_SHARED_LIBS` 支持与 `EVENTLY_API` 导出宏
+- 新增 `scripts/build-msvc.ps1 -Shared`
+- 新增 Doxygen 文档目标和 CI 文档任务
+- CI 增加 Linux/Windows 共享库任务
+- `ThreadSafety` 测试改为并发读 + 动态写
 
 ### v3.2.0 - 便利层与性能 (2026-10-22)
 
@@ -120,7 +133,7 @@ Reflection/
 - 新增字段/方法元数据：`FieldInfo`、`MethodInfo`、`ClassInfo`
 - 支持同名方法重载，按参数数量和精确类型解析
 - 支持 const 实例调用 const 方法，非 const 方法拒绝 const 实例
-- 注册中心新增 `freeze()`：冻结后禁止注册，之后支持并发只读访问
+- 注册中心新增 `freeze()`：发布只读快照（v4.0 起改为 COW，允许后续动态注册）
 - 重复注册、缺失类/字段/方法、参数错误全部统一为 `ReflectionError`
 - CMake install/export，支持 `find_package(Evently CONFIG REQUIRED)`
 - 新增 GitHub Actions CI（GCC/Clang/MSVC、C++11/17、ASan/UBSan/TSan）
@@ -205,9 +218,10 @@ Reflection/
 
 当前版本仍有以下边界：
 
-1. **线程安全模型是“冻结后只读”**：
-   - 注册阶段需在启动时完成；`freeze()` 之后不允许再注册
-   - 需要运行期动态注册时，应改为 COW 快照模型或在外部加锁
+1. **COW 快照边界**：
+   - 每次注册都会复制注册表快照，频繁写入时有内存/复制开销
+   - 暂无 unregister/clear；动态卸载插件需要额外的生命周期管理
+   - `getSetter` 返回 `shared_ptr`，调用方可以安全持有
 
 2. **方法/构造解析使用精确类型匹配**：
    - 不进行隐式数值转换；`int` 参数必须传 `Any(int)`
@@ -218,17 +232,19 @@ Reflection/
    - JSON 仅作为序列化示例，不含反序列化或通用协议支持
    - `Any` 小对象内联只覆盖小型、nothrow-move 类型，大对象仍堆分配
 
-4. **Windows 默认静态 CRT**：
-   - 集成到 `/MD` 项目时需要统一 `CMAKE_MSVC_RUNTIME_LIBRARY`
+4. **Windows 运行时选择**：
+   - 静态库构建默认使用静态 CRT；共享库构建使用动态 CRT
+   - 消费方需要与库保持相同的 Debug/Release 配置和运行时
 
 ---
 
 ## 🚀 后续方向
 
-### 🎯 v4.0.0 - 动态与分发
-- [ ] COW 快照，支持冻结后动态注册
-- [ ] 共享库导出宏与 `BUILD_SHARED_LIBS`
-- [ ] Doxygen API 文档与更多平台 CI
+### 🎯 v4.1.0 - 生命周期与运维
+- [ ] unregister/clear 与插件卸载
+- [ ] COW 快照的增量/分片优化，降低频繁写入成本
+- [ ] 共享库安装包消费方自动化测试
+- [ ] 性能基准与文档持续完善
 
 ---
 
@@ -271,7 +287,21 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-msvc.ps1 `
 
 构建目录分别为 `build\msvc-cxx14` 和 `build\msvc-cxx17`。
 
-CMake 默认将 MSVC 运行时设置为静态（Debug 为 `/MTd`，Release 为 `/MT`），因此 `Test.exe` 和 `ReflectionTests.exe` 不依赖额外的 Debug CRT DLL。如果要把 `evently_reflection` 集成到使用 `/MD` 的项目，请把双方的 `CMAKE_MSVC_RUNTIME_LIBRARY` 设置为一致。
+静态库构建默认将 MSVC 运行时设置为静态（Debug 为 `/MTd`，Release 为 `/MT`），因此 `Test.exe` 和 `ReflectionTests.exe` 不依赖额外的 Debug CRT DLL。共享库构建（`BUILD_SHARED_LIBS=ON`）使用动态 CRT，并由构建脚本注入运行库路径。
+
+共享库构建：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-msvc.ps1 -Standard 17 -Shared
+```
+
+Linux 共享库：
+
+```bash
+cmake -S . -B build/gcc-shared -DBUILD_SHARED_LIBS=ON -DEVENTLY_CXX_STANDARD=17
+cmake --build build/gcc-shared -j
+ctest --test-dir build/gcc-shared --output-on-failure
+```
 
 ### 安装与集成
 
@@ -290,7 +320,14 @@ target_link_libraries(app PRIVATE Evently::Reflection)
 #include <Evently/Reflection.h>
 ```
 
-安装包会提供 `EventlyConfig.cmake`、`EventlyTargets.cmake` 和 `include/Evently/` 头文件。Windows 消费方需要与库使用相同的 MSVC 运行时（默认静态），并保持 Debug/Release 配置一致。仓库内的 `examples/consumer` 是完整的最小消费方示例。
+安装包会提供 `EventlyConfig.cmake`、`EventlyTargets.cmake`、共享库/静态库和 `include/Evently/` 头文件。Windows 消费方需要与库保持相同的 Debug/Release 配置和运行时；静态库 Debug 消费方需传 `-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDebug`（Release 用 `MultiThreaded`），共享库消费方保持默认动态 CRT，并把安装目录的 `bin` 加入 `PATH`。仓库内的 `examples/consumer` 是完整的最小消费方示例。
+
+Doxygen 文档：
+
+```bash
+cmake -S . -B build/docs -DEVENTLY_BUILD_DOCS=ON -DBUILD_TESTING=OFF
+cmake --build build/docs --target docs
+```
 
 ### 手动编译
 
@@ -308,7 +345,7 @@ ctest --test-dir build\msvc-cxx14 -R reflection_ --output-on-failure
 
 Linux 下对应运行 `build/gcc-cxx11/ReflectionTests --test Any`。
 
-测试组：`Any`、`Fields`、`Methods`、`Factory`、`Metadata`、`Functions`、`Qualifiers`、`Constructors`、`AutoRegistration`、`RegistrationErrors`、`ThreadSafety`，共 250+ 项断言（C++17 额外包含 `noexcept` 用例）。CTest 将核心测试和会冻结注册中心的 `ThreadSafety` 分开进程运行，并运行 `JsonSerializationExample`。
+测试组：`Any`、`Fields`、`Methods`、`Factory`、`Metadata`、`Functions`、`Qualifiers`、`Constructors`、`AutoRegistration`、`RegistrationErrors`、`ThreadSafety`，共 250+ 项断言（C++17 额外包含 `noexcept` 用例）。CTest 将核心测试和会执行并发读写的 `ThreadSafety` 分开进程运行，并运行 `JsonSerializationExample`。
 
 ---
 
@@ -362,8 +399,7 @@ int main() {
     Evently::Any name = registry.invokeMethod("Person", "getName", person, {});
 
     try {
-        Evently::PropertySetterBase* setter =
-            registry.getSetter("Person", "age");
+        auto setter = registry.getSetter("Person", "age");
         setter->set(person, Evently::Any(30));
     } catch (const Evently::ReflectionError& error) {
         return static_cast<int>(error.code()) + 2;

@@ -1,0 +1,17 @@
+PROJECT_NAME           = EventlyReflection
+PROJECT_NUMBER         = @PROJECT_VERSION@
+OUTPUT_DIRECTORY       = @CMAKE_CURRENT_BINARY_DIR@/doxygen
+INPUT                  = @CMAKE_CURRENT_SOURCE_DIR@/README.md \
+                         @CMAKE_CURRENT_SOURCE_DIR@/Any.h \
+                         @CMAKE_CURRENT_SOURCE_DIR@/EventlyExport.h \
+                         @CMAKE_CURRENT_SOURCE_DIR@/IndexSequence.h \
+                         @CMAKE_CURRENT_SOURCE_DIR@/ObjectHandle.h \
+                         @CMAKE_CURRENT_SOURCE_DIR@/ReflectionError.h \
+                         @CMAKE_CURRENT_SOURCE_DIR@/Reflection.h
+RECURSIVE              = NO
+GENERATE_HTML          = YES
+GENERATE_LATEX         = NO
+EXTRACT_ALL            = YES
+QUIET                  = YES
+WARN_IF_UNDOCUMENTED   = NO
+HAVE_DOT               = NO

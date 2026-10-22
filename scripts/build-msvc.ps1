@@ -8,6 +8,8 @@ param(
 
     [string]$BuildDir,
 
+    [switch]$Shared,
+
     [string]$VsRoot = 'D:\Program Files (x86)\Microsoft Visual Studio\2019\Community',
 
     [string]$SdkRoot = 'D:\Windows Kits\10'
@@ -112,7 +114,8 @@ if (-not (Test-Path -LiteralPath $ctest)) {
 
 $sourceDir = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 if (-not $BuildDir) {
-    $BuildDir = Join-Path $sourceDir "build\msvc-cxx$Standard"
+    $suffix = if ($Shared) { '-shared' } else { '' }
+    $BuildDir = Join-Path $sourceDir "build\msvc-cxx$Standard$suffix"
 }
 $BuildDir = [System.IO.Path]::GetFullPath($BuildDir)
 
@@ -124,9 +127,11 @@ if ($Standard -eq '11') {
 }
 Write-Host "Build dir:      $BuildDir"
 
+$sharedOption = if ($Shared) { 'ON' } else { 'OFF' }
 & $cmake -S $sourceDir -B $BuildDir -G Ninja `
     "-DCMAKE_BUILD_TYPE=$Configuration" `
-    "-DEVENTLY_CXX_STANDARD=$Standard"
+    "-DEVENTLY_CXX_STANDARD=$Standard" `
+    "-DBUILD_SHARED_LIBS=$sharedOption"
 Assert-LastExitCode
 
 & $cmake --build $BuildDir
