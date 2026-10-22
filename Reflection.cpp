@@ -51,6 +51,21 @@ namespace Evently
         classNamesSet_.insert(className);
     }
 
+    void ReflectionRegistry::checkClassNameOwnerLocked(
+        const std::type_index &type, const std::string &className)
+    {
+        auto owner = classNameOwners_.find(className);
+        if (owner != classNameOwners_.end() && owner->second != type)
+        {
+            throw ReflectionError(ReflectionErrorCode::ClassNameConflict,
+                                  "类名已属于其他类型: " + className);
+        }
+        if (owner == classNameOwners_.end())
+        {
+            classNameOwners_.insert(std::make_pair(className, type));
+        }
+    }
+
     void ReflectionRegistry::addClassName(const std::type_index &type,
                                           const std::string &className)
     {
@@ -67,11 +82,13 @@ namespace Evently
             throw ReflectionError(ReflectionErrorCode::DuplicateRegistration,
                                   "该类型已注册为其他类名");
         }
+        checkClassNameOwnerLocked(type, className);
         classNames_[type] = className;
         ensureClassLocked(className);
     }
 
-    void ReflectionRegistry::addField(const std::string &className,
+    void ReflectionRegistry::addField(const std::type_index &type,
+                                      const std::string &className,
                                       const std::string &fieldName,
                                       std::unique_ptr<PropertySetterBase> setter)
     {
@@ -87,6 +104,7 @@ namespace Evently
         }
         std::lock_guard<std::mutex> lock(mutex_);
         ensureMutableLocked();
+        checkClassNameOwnerLocked(type, className);
         auto key = std::make_pair(className, fieldName);
         if (setters_.find(key) != setters_.end())
         {
@@ -97,7 +115,8 @@ namespace Evently
         ensureClassLocked(className);
     }
 
-    void ReflectionRegistry::addMethod(const std::string &className,
+    void ReflectionRegistry::addMethod(const std::type_index &type,
+                                       const std::string &className,
                                        const std::string &methodName,
                                        std::unique_ptr<MethodInvokerBase> invoker)
     {
@@ -113,6 +132,7 @@ namespace Evently
         }
         std::lock_guard<std::mutex> lock(mutex_);
         ensureMutableLocked();
+        checkClassNameOwnerLocked(type, className);
         auto key = std::make_pair(className, methodName);
         std::vector<std::unique_ptr<MethodInvokerBase>> &candidates = methods_[key];
         const std::vector<std::type_index> parameters = invoker->parameterTypes();
@@ -132,7 +152,8 @@ namespace Evently
         ensureClassLocked(className);
     }
 
-    void ReflectionRegistry::addFactory(const std::string &className,
+    void ReflectionRegistry::addFactory(const std::type_index &type,
+                                        const std::string &className,
                                         std::unique_ptr<ObjectFactory> factory)
     {
         if (className.empty())
@@ -147,6 +168,7 @@ namespace Evently
         }
         std::lock_guard<std::mutex> lock(mutex_);
         ensureMutableLocked();
+        checkClassNameOwnerLocked(type, className);
         if (factories_.find(className) != factories_.end())
         {
             throw ReflectionError(ReflectionErrorCode::DuplicateRegistration,

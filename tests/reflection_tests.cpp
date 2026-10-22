@@ -670,6 +670,15 @@ namespace
                     (registry.getAllValues("Missing", &object)));
         CHECK_ERROR(ReflectionErrorCode::FieldNotFound,
                     (registry.getValues("TestObject", "missing", &object)));
+
+        registry.registerClassName<Unregistered>("ConflictName");
+        CHECK_ERROR(ReflectionErrorCode::ClassNameConflict,
+                    (registry.registerClassName<NoDefault>("ConflictName")));
+        CHECK_ERROR(ReflectionErrorCode::ClassNameConflict,
+                    (registry.registerField<NoDefault>(
+                        "ConflictName", "value", &NoDefault::value_)));
+        CHECK_ERROR(ReflectionErrorCode::ClassNameConflict,
+                    (registry.registerClass<NoDefault, int>("ConflictName", 1)));
     }
 
     void testThreadSafety()
@@ -762,12 +771,17 @@ int main(int argc, char **argv)
 #endif
 
     std::string filter;
+    std::string exclude;
     for (int index = 1; index < argc; ++index)
     {
         std::string argument = argv[index];
         if (argument == "--test" && index + 1 < argc)
         {
             filter = argv[++index];
+        }
+        else if (argument == "--exclude" && index + 1 < argc)
+        {
+            exclude = argv[++index];
         }
     }
 
@@ -786,6 +800,10 @@ int main(int argc, char **argv)
     for (std::size_t index = 0; index < testCount; ++index)
     {
         if (!filter.empty() && filter != tests[index].name)
+        {
+            continue;
+        }
+        if (!exclude.empty() && exclude == tests[index].name)
         {
             continue;
         }

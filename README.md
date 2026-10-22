@@ -54,6 +54,7 @@ Reflection/
 ├── cmake/EventlyConfig.cmake.in # CMake package 配置模板
 ├── .github/workflows/ci.yml    # Linux/Windows/消毒器 CI
 ├── CMakeLists.txt        # CMake 构建与安装配置
+├── LICENSE               # MIT 许可证
 └── README.md             # 项目文档
 ```
 
@@ -73,11 +74,18 @@ Reflection/
 - ✅ void 返回类型方法的正确处理
 - ✅ 类型安全 `ObjectHandle`、统一错误码与元数据查询
 - ✅ 方法重载、const 实例调用、冻结后并发只读
-- ✅ install/export、CI 与 190 项断言的回归测试
+- ✅ install/export、CI 与 190+ 项断言的回归测试
 
 ---
 
 ## 📅 更新日志
+
+### v3.0.1 - 稳定性修复 (2026-10-22)
+
+- 不同类型禁止注册同名类名，新增 `ClassNameConflict`
+- CTest 拆分 `reflection_core` 与独立的 `reflection_thread_safety`
+- 测试 runner 支持 `--exclude`
+- 增加 MIT `LICENSE`
 
 ### v3.0.0 - 生产级核心 (2026-10-22)
 
@@ -279,12 +287,12 @@ g++ -std=c++17 -Wall -Wextra -I. main.cpp Reflection.cpp -o Test
 
 ```powershell
 build\msvc-cxx14\ReflectionTests.exe --test Any
-ctest --test-dir build\msvc-cxx14 -R reflection_tests --output-on-failure
+ctest --test-dir build\msvc-cxx14 -R reflection_ --output-on-failure
 ```
 
 Linux 下对应运行 `build/gcc-cxx11/ReflectionTests --test Any`。
 
-测试组：`Any`、`Fields`、`Methods`、`Factory`、`Metadata`、`RegistrationErrors`、`ThreadSafety`，共 190 项断言。
+测试组：`Any`、`Fields`、`Methods`、`Factory`、`Metadata`、`RegistrationErrors`、`ThreadSafety`，共 190+ 项断言。CTest 将核心测试和会冻结注册中心的 `ThreadSafety` 分开进程运行。
 
 ---
 

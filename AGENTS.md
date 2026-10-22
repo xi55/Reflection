@@ -17,7 +17,7 @@
   C++17 用 `-Standard 17`。构建目录是 `build\msvc-cxx14` / `build\msvc-cxx17`。
 - MSVC 没有 `/std:c++11`；CMake 的 `CXX_STANDARD 11` 在 MSVC 上不加 `/std` 参数，实际使用默认 C++14。真正的 C++11 门槛是 GCC 的 `-std=c++11`。
 - CMake 变量 `EVENTLY_CXX_STANDARD` 可取 `11/14/17`，默认 `11`；`CXX_EXTENSIONS OFF`。
-- 单测：`build\msvc-cxx14\ReflectionTests.exe --test Any`，或 `ctest --test-dir build\msvc-cxx14 -R reflection_tests --output-on-failure`。测试组：`Any`、`Fields`、`Methods`、`Factory`、`Metadata`、`RegistrationErrors`、`ThreadSafety`，共 190 项断言。
+- 单测：`build\msvc-cxx14\ReflectionTests.exe --test Any`，或 `ctest --test-dir build\msvc-cxx14 -R reflection_ --output-on-failure`。测试组：`Any`、`Fields`、`Methods`、`Factory`、`Metadata`、`RegistrationErrors`、`ThreadSafety`，共 190+ 项断言。CTest 把核心测试和会冻结注册中心的 `ThreadSafety` 分成两个独立进程。
 - 源文件是无 BOM 的 UTF-8，含中文注释和字符串；MSVC 的 `/utf-8` 已由 CMake 统一加到库和测试，并通过 `evently_reflection` 的 INTERFACE 选项传播给安装后的消费方，不要移除。
 - 本机 Windows SDK 在 `D:\Windows Kits\10`，但 SDK 注册表键可能缺失：单独运行 `vcvars64.bat` 只会设置 MSVC 的 `INCLUDE/LIB`，不会设置 UCRT/SDK。使用 `scripts/build-msvc.ps1`，或手动注入 SDK 的 `INCLUDE/LIB/PATH`；Debug 程序还需要 SDK 的 `ucrt` 运行时目录和 MSVC Debug CRT 目录。
 - Windows 默认使用静态 MSVC 运行时（Debug `/MTd`，Release `/MT`），所以 `Test.exe`/`ReflectionTests.exe` 可以在普通 PowerShell 中直接运行。若把 `evently_reflection` 链接到 `/MD` 项目，必须统一 `CMAKE_MSVC_RUNTIME_LIBRARY`；安装包只包含本次构建配置，Debug/Release 也要匹配。
@@ -28,6 +28,7 @@
 - `getParam` 在编译期拒绝非 const 左值引用和右值引用参数；反射方法参数只能按值或 const 引用传递。
 - `registerField<T>(fieldName, field)` 依赖先调用 `registerClassName<T>`；未注册时抛 `ReflectionError(ClassNotFound)`。
 - `registerClass` 使用 `ObjectFactorySelector` 选择工厂，避免两个分支同时实例化；无默认构造函数的 T 必须带构造参数注册。字段/方法/工厂/类名重复注册默认抛 `ReflectionError(DuplicateRegistration)`。
+- 类名有所有权：同一个类名只能属于一个类型，不同类型同名抛 `ReflectionError(ClassNameConflict)`；同一类型可以通过 `registerClass<T>` 注册多个别名类名。
 - 注册中心使用“冻结后只读”模型：启动阶段注册，`freeze()` 之后禁止注册；冻结后读操作无锁且可并发。冻结前不要并发注册/查询，也不要在冻结前长期持有 `getSetter` 返回的指针。
 - `ReflectionRegistry` 是单例且没有 `clear()`；测试使用不同类名隔离状态，不要重复注册同一签名。
 - `createInstance` 返回 `ObjectHandle`，未知类抛 `ReflectionError(ClassNotFound)`；`getSetter` 对缺失字段抛 `FieldNotFound`，对 const 字段抛 `FieldNotWritable`；`getValues`/`getAllValues`/`getMethodNames` 对缺失项抛错；用 `hasClass`/`hasField`/`hasMethod`/`isFieldWritable` 做非抛出查询。

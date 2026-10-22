@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(EventlyReflection VERSION 3.0.0 LANGUAGES CXX)
+project(EventlyReflection VERSION 3.0.1 LANGUAGES CXX)
 
 if(MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" CACHE STRING "MSVC runtime library")
@@ -54,7 +54,8 @@ if(BUILD_TESTING)
     )
     target_link_libraries(ReflectionTests PRIVATE evently_reflection Threads::Threads)
     evently_target_defaults(ReflectionTests)
-    add_test(NAME reflection_tests COMMAND ReflectionTests)
+    add_test(NAME reflection_core COMMAND ReflectionTests --exclude ThreadSafety)
+    add_test(NAME reflection_thread_safety COMMAND ReflectionTests --test ThreadSafety)
 endif()
 
 install(TARGETS evently_reflection

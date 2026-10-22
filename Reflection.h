@@ -259,7 +259,7 @@ namespace Evently
         {
             static_assert(sizeof...(Args) != 0 || std::is_default_constructible<T>::value,
                           "default-constructed registration requires a default constructor");
-            addFactory(className,
+            addFactory(std::type_index(typeid(T)), className,
                        std::unique_ptr<ObjectFactory>(
                            new typename ObjectFactorySelector<
                                T, typename std::decay<Args>::type...>::type(
@@ -316,13 +316,17 @@ namespace Evently
         std::unique_lock<std::mutex> readLock() const;
         void ensureMutableLocked() const;
         void ensureClassLocked(const std::string &className);
+        void checkClassNameOwnerLocked(const std::type_index &type,
+                                       const std::string &className);
 
         void addClassName(const std::type_index &type, const std::string &className);
-        void addField(const std::string &className, const std::string &fieldName,
+        void addField(const std::type_index &type, const std::string &className,
+                      const std::string &fieldName,
                       std::unique_ptr<PropertySetterBase> setter);
-        void addMethod(const std::string &className, const std::string &methodName,
+        void addMethod(const std::type_index &type, const std::string &className,
+                       const std::string &methodName,
                        std::unique_ptr<MethodInvokerBase> invoker);
-        void addFactory(const std::string &className,
+        void addFactory(const std::type_index &type, const std::string &className,
                         std::unique_ptr<ObjectFactory> factory);
 
         Any invokeMethodImpl(const std::string &className,
@@ -345,6 +349,7 @@ namespace Evently
 
         std::unordered_map<std::string, std::set<std::string>> methodNames_;
         std::unordered_map<std::type_index, std::string> classNames_;
+        std::unordered_map<std::string, std::type_index> classNameOwners_;
         std::set<std::string> classNamesSet_;
         std::unordered_map<std::string, std::unique_ptr<ObjectFactory>> factories_;
     };
@@ -629,7 +634,7 @@ namespace Evently
                                             const std::string &methodName,
                                             ReturnType (T::*method)(Args...))
     {
-        addMethod(className, methodName,
+        addMethod(std::type_index(typeid(T)), className, methodName,
                   std::unique_ptr<MethodInvokerBase>(
                       new MethodInvoker<T, ReturnType, Args...>(method)));
     }
@@ -639,7 +644,7 @@ namespace Evently
                                             const std::string &methodName,
                                             ReturnType (T::*method)())
     {
-        addMethod(className, methodName,
+        addMethod(std::type_index(typeid(T)), className, methodName,
                   std::unique_ptr<MethodInvokerBase>(
                       new MethodInvoker<T, ReturnType>(method)));
     }
@@ -649,7 +654,7 @@ namespace Evently
                                             const std::string &methodName,
                                             ReturnType (T::*method)(Args...) const)
     {
-        addMethod(className, methodName,
+        addMethod(std::type_index(typeid(T)), className, methodName,
                   std::unique_ptr<MethodInvokerBase>(
                       new ConstMethodInvoker<T, ReturnType, Args...>(method)));
     }
@@ -659,7 +664,7 @@ namespace Evently
                                            const std::string &fieldName,
                                            FieldType T::*field)
     {
-        addField(className, fieldName,
+        addField(std::type_index(typeid(T)), className, fieldName,
                  std::unique_ptr<PropertySetterBase>(
                      new PropertySetter<T, FieldType>(field)));
     }
@@ -679,7 +684,7 @@ namespace Evently
             }
             className = it->second;
         }
-        addField(className, fieldName,
+        addField(std::type_index(typeid(T)), className, fieldName,
                  std::unique_ptr<PropertySetterBase>(
                      new PropertySetter<T, FieldType>(field)));
     }
