@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(EventlyReflection VERSION 3.0.1 LANGUAGES CXX)
+project(EventlyReflection VERSION 3.1.0 LANGUAGES CXX)
 
 if(MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" CACHE STRING "MSVC runtime library")

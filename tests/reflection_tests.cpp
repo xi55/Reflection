@@ -118,6 +118,15 @@ namespace
         int qualifier() { return 1; }
         int qualifier() const { return 2; }
 
+        static int staticAdd(int a, int b) { return a + b; }
+
+        int refQualified() & { return 1; }
+        int refQualified() const & { return 2; }
+        int refQualified() && { return 3; }
+        int refQualified() const && { return 4; }
+
+        int noexceptValue() const noexcept { return 7; }
+
         int value_ = 0;
         std::string name_;
         double score_ = 0.0;
@@ -154,10 +163,45 @@ namespace
         int value_ = 0;
     };
 
+    class ConstructorObject
+    {
+    public:
+        ConstructorObject() : value_(0) {}
+        explicit ConstructorObject(int value) : value_(value) {}
+        ConstructorObject(int value, const std::string &name)
+            : value_(value), name_(name) {}
+
+        int value_;
+        std::string name_;
+    };
+
+    class NoFactory
+    {
+    public:
+        int value_ = 0;
+    };
+
+    int freeAdd(int a, int b)
+    {
+        return a + b;
+    }
+
     typedef int (TestObject::*OverloadedInt)(int);
     typedef std::string (TestObject::*OverloadedString)(const std::string &) const;
     typedef int (TestObject::*QualifierMutable)();
     typedef int (TestObject::*QualifierConst)() const;
+    typedef int (TestObject::*RefQualifiedLValue)() &;
+    typedef int (TestObject::*RefQualifiedConstLValue)() const &;
+    typedef int (TestObject::*RefQualifiedRValue)() &&;
+    typedef int (TestObject::*RefQualifiedConstRValue)() const &&;
+
+#if EVENTLY_HAS_NOEXCEPT_FUNCTION_TYPE
+    const std::size_t expectedMethodCount = 19u;
+    const std::size_t expectedMethodNameCount = 14u;
+#else
+    const std::size_t expectedMethodCount = 18u;
+    const std::size_t expectedMethodNameCount = 13u;
+#endif
 
     void registerTypes()
     {
@@ -203,12 +247,39 @@ namespace
             "TestObject", "qualifier", static_cast<QualifierMutable>(&TestObject::qualifier));
         registry.registerMethod<TestObject, int>(
             "TestObject", "qualifier", static_cast<QualifierConst>(&TestObject::qualifier));
+        registry.registerMethod<TestObject, int>(
+            "TestObject", "refQualified",
+            static_cast<RefQualifiedLValue>(&TestObject::refQualified));
+        registry.registerMethod<TestObject, int>(
+            "TestObject", "refQualified",
+            static_cast<RefQualifiedConstLValue>(&TestObject::refQualified));
+        registry.registerMethod<TestObject, int>(
+            "TestObject", "refQualified",
+            static_cast<RefQualifiedRValue>(&TestObject::refQualified));
+        registry.registerMethod<TestObject, int>(
+            "TestObject", "refQualified",
+            static_cast<RefQualifiedConstRValue>(&TestObject::refQualified));
+#if EVENTLY_HAS_NOEXCEPT_FUNCTION_TYPE
+        registry.registerMethod<TestObject, int>(
+            "TestObject", "noexceptValue", &TestObject::noexceptValue);
+#endif
+        registry.registerStaticMethod<TestObject, int, int, int>(
+            "TestObject", "staticAdd", &TestObject::staticAdd);
+        registry.registerFunction<int, int, int>(
+            "FreeFunctions", "add", &freeAdd);
 
         registry.registerClass<TestObject>("TestObject");
         registry.registerClass<TestObject, int, std::string>(
             "TestObjectWithArgs", 7, std::string("seven"));
         registry.registerClass<NoDefault, int>("NoDefaultWithArgs", 9);
         registry.registerClass<Lifetime>("Lifetime");
+
+        registry.registerClassName<ConstructorObject>("ConstructorObject");
+        registry.registerConstructor<ConstructorObject>("ConstructorObject");
+        registry.registerConstructor<ConstructorObject, int>("ConstructorObject");
+        registry.registerConstructor<ConstructorObject, int, const std::string &>(
+            "ConstructorObject");
+        registry.registerClassName<NoFactory>("NoFactory");
     }
 
     void testAny()
@@ -428,7 +499,7 @@ namespace
                     (registry.invokeMethod("TestObject", "getValue", nullptr, {})));
 
         std::set<std::string> names = registry.getMethodNames("TestObject");
-        CHECK(names.size() == 11u);
+        CHECK(names.size() == expectedMethodNameCount);
         CHECK(names.count("setValue") == 1u);
         CHECK(names.count("overloaded") == 1u);
         CHECK(names.count("qualifier") == 1u);
@@ -540,7 +611,7 @@ namespace
         CHECK(foundConst);
 
         std::vector<MethodInfo> methods = registry.getMethods("TestObject");
-        CHECK(methods.size() == 13u);
+        CHECK(methods.size() == expectedMethodCount);
         bool foundIntOverload = false;
         bool foundStringOverload = false;
         bool foundMutableQualifier = false;
@@ -590,6 +661,8 @@ namespace
         CHECK(info.name == "TestObject");
         CHECK(info.fields.size() == fields.size());
         CHECK(info.methods.size() == methods.size());
+        CHECK(info.constructors.empty());
+        CHECK(registry.getConstructors("TestObject").empty());
 
         CHECK_ERROR(ReflectionErrorCode::ClassNotFound,
                     (registry.getFields("Missing")));
@@ -597,6 +670,178 @@ namespace
                     (registry.getMethods("Missing")));
         CHECK_ERROR(ReflectionErrorCode::ClassNotFound,
                     (registry.getClassInfo("Missing")));
+    }
+
+    void testFunctions()
+    {
+        ReflectionRegistry &registry = ReflectionRegistry::getInstance();
+        TestObject object;
+
+        CHECK(any_cast<int>(registry.invokeFunction(
+                  "TestObject", "staticAdd", {Any(2), Any(3)})) == 5);
+        CHECK(any_cast<int>(registry.invokeFunction(
+                  "FreeFunctions", "add", {Any(3), Any(4)})) == 7);
+        CHECK(registry.hasClass("FreeFunctions"));
+        CHECK(registry.hasMethod("TestObject", "staticAdd"));
+        CHECK(registry.hasMethod("FreeFunctions", "add"));
+
+        CHECK_ERROR(ReflectionErrorCode::MethodNotFound,
+                    (registry.invokeMethod("TestObject", "staticAdd", &object,
+                                           {Any(1), Any(2)})));
+        CHECK_ERROR(ReflectionErrorCode::MethodNotFound,
+                    (registry.invokeFunction("FreeFunctions", "missing", {})));
+        CHECK_ERROR(ReflectionErrorCode::ArgumentCountMismatch,
+                    (registry.invokeFunction("FreeFunctions", "add", {Any(1)})));
+        CHECK_ERROR(ReflectionErrorCode::ArgumentTypeMismatch,
+                    (registry.invokeFunction("FreeFunctions", "add",
+                                             {Any(1.5), Any(2.5)})));
+
+        std::vector<MethodInfo> functions = registry.getMethods("FreeFunctions");
+        CHECK(functions.size() == 1u);
+        if (functions.size() == 1u)
+        {
+            CHECK(functions[0].isStatic);
+            CHECK(!functions[0].isConst);
+            CHECK(functions[0].name == "add");
+            CHECK(functions[0].arity == 2u);
+        }
+
+        std::vector<MethodInfo> methods = registry.getMethods("TestObject");
+        bool foundStatic = false;
+        for (std::size_t index = 0; index < methods.size(); ++index)
+        {
+            if (methods[index].name == "staticAdd")
+            {
+                foundStatic = true;
+                CHECK(methods[index].isStatic);
+            }
+        }
+        CHECK(foundStatic);
+    }
+
+    void testQualifiers()
+    {
+        ReflectionRegistry &registry = ReflectionRegistry::getInstance();
+        TestObject object(3, "Bob");
+        const TestObject constObject(4, "Const");
+
+        CHECK(any_cast<int>(registry.invokeMethod(
+                  "TestObject", "refQualified", &object, {})) == 1);
+        CHECK(any_cast<int>(registry.invokeMethod(
+                  "TestObject", "refQualified", &constObject, {})) == 2);
+        CHECK(any_cast<int>(registry.invokeMethod(
+                  "TestObject", "refQualified", RvalueInstance(&object), {})) == 3);
+        CHECK(any_cast<int>(registry.invokeMethod(
+                  "TestObject", "refQualified", RvalueInstance(&constObject), {})) == 4);
+        CHECK(any_cast<int>(registry.invokeMethod(
+                  "TestObject", "refQualified",
+                  RvalueInstance(static_cast<const void *>(&constObject)), {})) == 4);
+
+#if EVENTLY_HAS_NOEXCEPT_FUNCTION_TYPE
+        CHECK(any_cast<int>(registry.invokeMethod(
+                  "TestObject", "noexceptValue", &constObject, {})) == 7);
+#endif
+
+        std::vector<MethodInfo> methods = registry.getMethods("TestObject");
+        int lvalueCount = 0;
+        int constLvalueCount = 0;
+        int rvalueCount = 0;
+        int constRvalueCount = 0;
+#if EVENTLY_HAS_NOEXCEPT_FUNCTION_TYPE
+        bool foundNoexcept = false;
+#endif
+        for (std::size_t index = 0; index < methods.size(); ++index)
+        {
+            if (methods[index].name == "refQualified")
+            {
+                if (methods[index].refQualifier == RefQualifier::LValue)
+                {
+                    ++lvalueCount;
+                }
+                else if (methods[index].refQualifier ==
+                         RefQualifier::ConstLValue)
+                {
+                    ++constLvalueCount;
+                }
+                else if (methods[index].refQualifier == RefQualifier::RValue)
+                {
+                    ++rvalueCount;
+                }
+                else if (methods[index].refQualifier ==
+                         RefQualifier::ConstRValue)
+                {
+                    ++constRvalueCount;
+                }
+            }
+#if EVENTLY_HAS_NOEXCEPT_FUNCTION_TYPE
+            if (methods[index].name == "noexceptValue")
+            {
+                foundNoexcept = true;
+                CHECK(methods[index].isConst);
+            }
+#endif
+        }
+        CHECK(lvalueCount == 1);
+        CHECK(constLvalueCount == 1);
+        CHECK(rvalueCount == 1);
+        CHECK(constRvalueCount == 1);
+#if EVENTLY_HAS_NOEXCEPT_FUNCTION_TYPE
+        CHECK(foundNoexcept);
+#endif
+    }
+
+    void testConstructors()
+    {
+        ReflectionRegistry &registry = ReflectionRegistry::getInstance();
+
+        ObjectHandle defaultObject = registry.createInstance("ConstructorObject");
+        ConstructorObject *defaultValue = defaultObject.get<ConstructorObject>();
+        CHECK(defaultValue != nullptr);
+        if (defaultValue)
+        {
+            CHECK(defaultValue->value_ == 0);
+            CHECK(defaultValue->name_.empty());
+        }
+
+        ObjectHandle oneArg = registry.createInstance(
+            "ConstructorObject", {Any(7)});
+        ConstructorObject *oneArgValue = oneArg.get<ConstructorObject>();
+        CHECK(oneArgValue != nullptr);
+        if (oneArgValue)
+        {
+            CHECK(oneArgValue->value_ == 7);
+        }
+
+        ObjectHandle twoArgs = registry.createInstanceWithArgs(
+            "ConstructorObject", 9, std::string("nine"));
+        ConstructorObject *twoArgsValue = twoArgs.get<ConstructorObject>();
+        CHECK(twoArgsValue != nullptr);
+        if (twoArgsValue)
+        {
+            CHECK(twoArgsValue->value_ == 9);
+            CHECK(twoArgsValue->name_ == "nine");
+        }
+
+        CHECK_ERROR(ReflectionErrorCode::ArgumentCountMismatch,
+                    (registry.createInstance(
+                        "ConstructorObject", {Any(1), Any(2), Any(3)})));
+        CHECK_ERROR(ReflectionErrorCode::ArgumentTypeMismatch,
+                    (registry.createInstance(
+                        "ConstructorObject", {Any(std::string("bad"))})));
+        CHECK_ERROR(ReflectionErrorCode::ArgumentTypeMismatch,
+                    (registry.createInstance(
+                        "ConstructorObject", {Any(1), Any(2)})));
+        CHECK_ERROR(ReflectionErrorCode::ConstructorNotFound,
+                    (registry.createInstance("NoFactory")));
+        CHECK_ERROR(ReflectionErrorCode::ClassNotFound,
+                    (registry.createInstance("MissingConstructorClass")));
+
+        CHECK(registry.getConstructors("ConstructorObject").size() == 3u);
+        ClassInfo info = registry.getClassInfo("ConstructorObject");
+        CHECK(info.constructors.size() == 3u);
+        CHECK_ERROR(ReflectionErrorCode::DuplicateRegistration,
+                    (registry.registerConstructor<ConstructorObject, int>(
+                        "ConstructorObject")));
     }
 
     void testRegistrationErrors()
@@ -729,7 +974,8 @@ namespace
                         {
                             ++errors;
                         }
-                        if (registry.getMethods("TestObject").size() != 13u)
+                        if (registry.getMethods("TestObject").size() !=
+                            expectedMethodCount)
                         {
                             ++errors;
                         }
@@ -760,6 +1006,9 @@ namespace
         {"Methods", testMethods},
         {"Factory", testFactory},
         {"Metadata", testMetadata},
+        {"Functions", testFunctions},
+        {"Qualifiers", testQualifiers},
+        {"Constructors", testConstructors},
         {"RegistrationErrors", testRegistrationErrors},
         {"ThreadSafety", testThreadSafety}};
 }

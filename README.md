@@ -30,6 +30,8 @@
 - ✅ 统一 `ReflectionError` 错误码与 `hasClass` / `hasField` / `hasMethod` 查询
 - ✅ 字段与方法元数据（字段类型、可写性、参数类型、返回类型、const 标记）
 - ✅ 方法重载解析（按参数数量和精确类型匹配）
+- ✅ `noexcept`、完整 ref-qualified（含 `&&`）、静态/自由函数
+- ✅ 运行期构造函数注册与参数匹配
 - ✅ const 实例只能调用 const 方法
 - ✅ 初始化后 `freeze()`，之后可并发只读访问
 - ✅ CMake install/export，支持 `find_package(Evently CONFIG REQUIRED)`
@@ -74,11 +76,21 @@ Reflection/
 - ✅ void 返回类型方法的正确处理
 - ✅ 类型安全 `ObjectHandle`、统一错误码与元数据查询
 - ✅ 方法重载、const 实例调用、冻结后并发只读
-- ✅ install/export、CI 与 190+ 项断言的回归测试
+- ✅ `noexcept`、完整 ref-qualified、静态/自由函数、运行期构造函数
+- ✅ install/export、CI 与 230+ 项断言的回归测试
 
 ---
 
 ## 📅 更新日志
+
+### v3.1.0 - 调用能力扩展 (2026-10-22)
+
+- 支持 `noexcept` 成员函数（C++17 条件启用）
+- 支持 `&`、`const &`、`&&`、`const &&` ref-qualified 成员函数，新增 `RvalueInstance`
+- 支持静态成员函数和自由函数，新增 `invokeFunction`
+- 支持运行期构造函数注册与匹配：`registerConstructor`、`createInstance(className, args)`、`createInstanceWithArgs`
+- `MethodInfo` 增加 `isStatic`、`refQualifier`；`ClassInfo` 增加构造函数元数据
+- 新增 `Functions`、`Qualifiers`、`Constructors` 测试组
 
 ### v3.0.1 - 稳定性修复 (2026-10-22)
 
@@ -184,9 +196,9 @@ Reflection/
    - 注册阶段需在启动时完成；`freeze()` 之后不允许再注册
    - 需要运行期动态注册时，应改为 COW 快照模型或在外部加锁
 
-2. **方法解析使用精确类型匹配**：
+2. **方法/构造解析使用精确类型匹配**：
    - 不进行隐式数值转换；`int` 参数必须传 `Any(int)`
-   - 暂不支持 `noexcept`、ref-qualified、静态/自由函数
+   - 构造参数同样按精确 `type_index` 匹配
 
 3. **便利层尚未完成**：
    - 暂无自动注册宏
@@ -199,11 +211,6 @@ Reflection/
 ---
 
 ## 🚀 后续方向
-
-### 🎯 v3.1.0 - 调用能力扩展
-- [ ] 支持 `noexcept`、ref-qualified 成员函数
-- [ ] 支持静态函数/自由函数注册
-- [ ] 可选的隐式数值转换策略
 
 ### 🎯 v3.2.0 - 便利层
 - [ ] 自动注册宏（显式 `registerAll()` 优先）
@@ -292,7 +299,7 @@ ctest --test-dir build\msvc-cxx14 -R reflection_ --output-on-failure
 
 Linux 下对应运行 `build/gcc-cxx11/ReflectionTests --test Any`。
 
-测试组：`Any`、`Fields`、`Methods`、`Factory`、`Metadata`、`RegistrationErrors`、`ThreadSafety`，共 190+ 项断言。CTest 将核心测试和会冻结注册中心的 `ThreadSafety` 分开进程运行。
+测试组：`Any`、`Fields`、`Methods`、`Factory`、`Metadata`、`Functions`、`Qualifiers`、`Constructors`、`RegistrationErrors`、`ThreadSafety`，共 230+ 项断言（C++17 额外包含 `noexcept` 用例）。CTest 将核心测试和会冻结注册中心的 `ThreadSafety` 分开进程运行。
 
 ---
 
@@ -306,12 +313,19 @@ Linux 下对应运行 `build/gcc-cxx11/ReflectionTests --test Any`。
 
 class Person {
 public:
+    Person() {}
+    Person(const std::string& n, int a) : name(n), age(a) {}
+
     std::string name;
     int age = 0;
 
     void setName(const std::string& n) { name = n; }
     std::string getName() const { return name; }
+    static int addStatic(int a, int b) { return a + b; }
+    int consume() && { return age; }
 };
+
+int freeAdd(int a, int b) { return a + b; }
 
 int main() {
     Evently::ReflectionRegistry& registry =
@@ -348,6 +362,32 @@ int main() {
 
     return Evently::any_cast<std::string>(name) == "John" ? 0 : 1;
 }
+```
+
+### 静态函数、自由函数与运行期构造
+
+```cpp
+registry.registerStaticMethod<Person, int, int, int>(
+    "Person", "addStatic", &Person::addStatic);
+registry.registerFunction<int, int, int>(
+    "Math", "add", &freeAdd);
+
+Any sum = registry.invokeFunction("Math", "add", {Any(2), Any(3)});
+
+registry.registerConstructor<Person>("Person");
+registry.registerConstructor<Person, const std::string &, int>("Person");
+ObjectHandle person = registry.createInstanceWithArgs(
+    "Person", std::string("John"), 30);
+```
+
+`createInstance(className)` 优先使用 `registerClass` 绑定的工厂；没有工厂时使用无参构造函数。
+
+对 `&&` / `const &&` 成员函数使用 `RvalueInstance`：
+
+```cpp
+Person* raw = person.get<Person>();
+Any result = registry.invokeMethod(
+    "Person", "consume", RvalueInstance(raw), {});
 ```
 
 ---

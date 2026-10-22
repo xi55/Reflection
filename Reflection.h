@@ -21,8 +21,54 @@
 #include <utility>
 #include <vector>
 
+#if defined(__cpp_noexcept_function_type) || \
+    (defined(_MSVC_LANG) && _MSVC_LANG >= 201703L)
+#define EVENTLY_HAS_NOEXCEPT_FUNCTION_TYPE 1
+#else
+#define EVENTLY_HAS_NOEXCEPT_FUNCTION_TYPE 0
+#endif
+
 namespace Evently
 {
+    enum class RefQualifier
+    {
+        None,
+        LValue,
+        ConstLValue,
+        RValue,
+        ConstRValue
+    };
+
+    class RvalueInstance
+    {
+    public:
+        explicit RvalueInstance(void *instance) noexcept
+            : instance_(instance), isConst_(false) {}
+
+        explicit RvalueInstance(const void *instance) noexcept
+            : instance_(instance), isConst_(true) {}
+
+        explicit RvalueInstance(std::nullptr_t) noexcept
+            : instance_(nullptr), isConst_(true) {}
+
+        const void *get() const noexcept
+        {
+            return instance_;
+        }
+
+        bool isConst() const noexcept
+        {
+            return isConst_;
+        }
+
+    private:
+        const void *instance_;
+        bool isConst_;
+    };
+
+    template <typename ParamType>
+    static ParamType getParam(const Any &arg);
+
     class PropertySetterBase
     {
     public:
@@ -42,6 +88,17 @@ namespace Evently
         virtual std::vector<std::type_index> parameterTypes() const = 0;
         virtual std::type_index returnType() const = 0;
         virtual bool isConst() const = 0;
+        virtual bool isStatic() const = 0;
+        virtual RefQualifier refQualifier() const = 0;
+    };
+
+    class ConstructorInvokerBase
+    {
+    public:
+        virtual ~ConstructorInvokerBase() {}
+        virtual ObjectHandle construct(const std::vector<Any> &args) const = 0;
+        virtual std::size_t arity() const = 0;
+        virtual std::vector<std::type_index> parameterTypes() const = 0;
     };
 
     class ObjectFactory
@@ -77,16 +134,30 @@ namespace Evently
     {
         MethodInfo(const std::string &methodName, std::size_t methodArity,
                    const std::vector<std::type_index> &parameters,
-                   const std::type_index &resultType, bool constMethod)
+                   const std::type_index &resultType, bool constMethod,
+                   bool staticMethod, RefQualifier qualifier)
             : name(methodName), arity(methodArity),
               parameterTypes(parameters), returnType(resultType),
-              isConst(constMethod) {}
+              isConst(constMethod), isStatic(staticMethod),
+              refQualifier(qualifier) {}
 
         std::string name;
         std::size_t arity;
         std::vector<std::type_index> parameterTypes;
         std::type_index returnType;
         bool isConst;
+        bool isStatic;
+        RefQualifier refQualifier;
+    };
+
+    struct ConstructorInfo
+    {
+        ConstructorInfo(std::size_t constructorArity,
+                        const std::vector<std::type_index> &parameters)
+            : arity(constructorArity), parameterTypes(parameters) {}
+
+        std::size_t arity;
+        std::vector<std::type_index> parameterTypes;
     };
 
     struct ClassInfo
@@ -97,6 +168,7 @@ namespace Evently
         std::string name;
         std::vector<FieldInfo> fields;
         std::vector<MethodInfo> methods;
+        std::vector<ConstructorInfo> constructors;
     };
 
     template <typename T, typename FieldType>
@@ -116,71 +188,299 @@ namespace Evently
         void setImpl(void *instance, const Any &value, std::false_type);
     };
 
-    template <typename T, typename ReturnType, typename... Args>
-    class MethodInvoker : public MethodInvokerBase
+    template <typename T, typename ReturnType, typename MethodType,
+              bool IsConst, RefQualifier Qualifier, typename... Args>
+    class MethodInvokerGeneric : public MethodInvokerBase
     {
     public:
-        using MethodType = ReturnType (T::*)(Args...);
+        explicit MethodInvokerGeneric(MethodType method)
+            : method_(method) {}
 
-        explicit MethodInvoker(MethodType method);
-        Any invoke(const void *instance, const std::vector<Any> &args) const override;
-        std::size_t arity() const override;
-        std::vector<std::type_index> parameterTypes() const override;
-        std::type_index returnType() const override;
-        bool isConst() const override;
+        Any invoke(const void *instance, const std::vector<Any> &args) const override
+        {
+            if (instance == nullptr)
+            {
+                throw ReflectionError(ReflectionErrorCode::InvalidInstance,
+                                      "实例指针不能为空");
+            }
+            if (args.size() != sizeof...(Args))
+            {
+                throw ReflectionError(ReflectionErrorCode::ArgumentCountMismatch,
+                                      "参数数量不匹配");
+            }
+            return invokeImpl(instance, args,
+                              typename index_sequence_for<Args...>::type{},
+                              std::integral_constant<bool,
+                                                     std::is_void<ReturnType>::value>{});
+        }
+
+        std::size_t arity() const override
+        {
+            return sizeof...(Args);
+        }
+
+        std::vector<std::type_index> parameterTypes() const override
+        {
+            return std::vector<std::type_index>{std::type_index(typeid(Args))...};
+        }
+
+        std::type_index returnType() const override
+        {
+            return std::type_index(typeid(ReturnType));
+        }
+
+        bool isConst() const override
+        {
+            return IsConst;
+        }
+
+        bool isStatic() const override
+        {
+            return false;
+        }
+
+        RefQualifier refQualifier() const override
+        {
+            return Qualifier;
+        }
 
     private:
-        MethodType method_;
+        template <std::size_t... Indexes>
+        Any invokeImpl(const void *instance, const std::vector<Any> &args,
+                       index_sequence<Indexes...>, std::false_type) const
+        {
+            return Any(call(instance, getParam<Args>(args[Indexes])...));
+        }
 
         template <std::size_t... Indexes>
-        Any invokeImpl(T *obj, const std::vector<Any> &args,
-                       index_sequence<Indexes...>) const;
+        Any invokeImpl(const void *instance, const std::vector<Any> &args,
+                       index_sequence<Indexes...>, std::true_type) const
+        {
+            call(instance, getParam<Args>(args[Indexes])...);
+            return Any();
+        }
+
+        template <typename... CallArgs>
+        ReturnType call(const void *instance, CallArgs &&...callArgs) const
+        {
+            return callImpl(instance,
+                            std::integral_constant<RefQualifier, Qualifier>{},
+                            std::forward<CallArgs>(callArgs)...);
+        }
+
+        template <typename... CallArgs>
+        ReturnType callImpl(
+            const void *instance,
+            std::integral_constant<RefQualifier, RefQualifier::None>,
+            CallArgs &&...callArgs) const
+        {
+            return callNone(instance,
+                            std::integral_constant<bool, IsConst>{},
+                            std::forward<CallArgs>(callArgs)...);
+        }
+
+        template <typename... CallArgs>
+        ReturnType callNone(const void *instance, std::false_type,
+                            CallArgs &&...callArgs) const
+        {
+            T *obj = const_cast<T *>(static_cast<const T *>(instance));
+            return (obj->*method_)(std::forward<CallArgs>(callArgs)...);
+        }
+
+        template <typename... CallArgs>
+        ReturnType callNone(const void *instance, std::true_type,
+                            CallArgs &&...callArgs) const
+        {
+            const T *obj = static_cast<const T *>(instance);
+            return (obj->*method_)(std::forward<CallArgs>(callArgs)...);
+        }
+
+        template <typename... CallArgs>
+        ReturnType callImpl(
+            const void *instance,
+            std::integral_constant<RefQualifier, RefQualifier::LValue>,
+            CallArgs &&...callArgs) const
+        {
+            T *obj = const_cast<T *>(static_cast<const T *>(instance));
+            return (obj->*method_)(std::forward<CallArgs>(callArgs)...);
+        }
+
+        template <typename... CallArgs>
+        ReturnType callImpl(
+            const void *instance,
+            std::integral_constant<RefQualifier, RefQualifier::ConstLValue>,
+            CallArgs &&...callArgs) const
+        {
+            const T *obj = static_cast<const T *>(instance);
+            return (obj->*method_)(std::forward<CallArgs>(callArgs)...);
+        }
+
+        template <typename... CallArgs>
+        ReturnType callImpl(
+            const void *instance,
+            std::integral_constant<RefQualifier, RefQualifier::RValue>,
+            CallArgs &&...callArgs) const
+        {
+            T *obj = const_cast<T *>(static_cast<const T *>(instance));
+            return (std::move(*obj).*method_)(std::forward<CallArgs>(callArgs)...);
+        }
+
+        template <typename... CallArgs>
+        ReturnType callImpl(
+            const void *instance,
+            std::integral_constant<RefQualifier, RefQualifier::ConstRValue>,
+            CallArgs &&...callArgs) const
+        {
+            const T *obj = static_cast<const T *>(instance);
+            return (std::move(*obj).*method_)(std::forward<CallArgs>(callArgs)...);
+        }
+
+        MethodType method_;
+    };
+
+    template <typename T, typename ReturnType, typename... Args>
+    using MethodInvoker = MethodInvokerGeneric<
+        T, ReturnType, ReturnType (T::*)(Args...), false,
+        RefQualifier::None, Args...>;
+
+    template <typename T, typename ReturnType, typename... Args>
+    using ConstMethodInvoker = MethodInvokerGeneric<
+        T, ReturnType, ReturnType (T::*)(Args...) const, true,
+        RefQualifier::None, Args...>;
+
+    template <typename T, typename ReturnType, typename... Args>
+    using LValueMethodInvoker = MethodInvokerGeneric<
+        T, ReturnType, ReturnType (T::*)(Args...) &, false,
+        RefQualifier::LValue, Args...>;
+
+    template <typename T, typename ReturnType, typename... Args>
+    using ConstLValueMethodInvoker = MethodInvokerGeneric<
+        T, ReturnType, ReturnType (T::*)(Args...) const &, true,
+        RefQualifier::ConstLValue, Args...>;
+
+    template <typename T, typename ReturnType, typename... Args>
+    using RValueMethodInvoker = MethodInvokerGeneric<
+        T, ReturnType, ReturnType (T::*)(Args...) &&, false,
+        RefQualifier::RValue, Args...>;
+
+    template <typename T, typename ReturnType, typename... Args>
+    using ConstRValueMethodInvoker = MethodInvokerGeneric<
+        T, ReturnType, ReturnType (T::*)(Args...) const &&, true,
+        RefQualifier::ConstRValue, Args...>;
+
+#if EVENTLY_HAS_NOEXCEPT_FUNCTION_TYPE
+    template <typename T, typename ReturnType, typename... Args>
+    using NoexceptMethodInvoker = MethodInvokerGeneric<
+        T, ReturnType, ReturnType (T::*)(Args...) noexcept, false,
+        RefQualifier::None, Args...>;
+
+    template <typename T, typename ReturnType, typename... Args>
+    using ConstNoexceptMethodInvoker = MethodInvokerGeneric<
+        T, ReturnType, ReturnType (T::*)(Args...) const noexcept, true,
+        RefQualifier::None, Args...>;
+#endif
+
+    template <typename ReturnType, typename... Args>
+    class FunctionInvoker : public MethodInvokerBase
+    {
+    public:
+        typedef ReturnType (*FunctionType)(Args...);
+
+        explicit FunctionInvoker(FunctionType function)
+            : function_(function) {}
+
+        Any invoke(const void *, const std::vector<Any> &args) const override
+        {
+            if (args.size() != sizeof...(Args))
+            {
+                throw ReflectionError(ReflectionErrorCode::ArgumentCountMismatch,
+                                      "参数数量不匹配");
+            }
+            return invokeImpl(args, typename index_sequence_for<Args...>::type{},
+                              std::integral_constant<bool,
+                                                     std::is_void<ReturnType>::value>{});
+        }
+
+        std::size_t arity() const override
+        {
+            return sizeof...(Args);
+        }
+
+        std::vector<std::type_index> parameterTypes() const override
+        {
+            return std::vector<std::type_index>{std::type_index(typeid(Args))...};
+        }
+
+        std::type_index returnType() const override
+        {
+            return std::type_index(typeid(ReturnType));
+        }
+
+        bool isConst() const override
+        {
+            return false;
+        }
+
+        bool isStatic() const override
+        {
+            return true;
+        }
+
+        RefQualifier refQualifier() const override
+        {
+            return RefQualifier::None;
+        }
+
+    private:
+        template <std::size_t... Indexes>
+        Any invokeImpl(const std::vector<Any> &args,
+                       index_sequence<Indexes...>, std::false_type) const
+        {
+            return Any(function_(getParam<Args>(args[Indexes])...));
+        }
+
+        template <std::size_t... Indexes>
+        Any invokeImpl(const std::vector<Any> &args,
+                       index_sequence<Indexes...>, std::true_type) const
+        {
+            function_(getParam<Args>(args[Indexes])...);
+            return Any();
+        }
+
+        FunctionType function_;
     };
 
     template <typename T, typename... Args>
-    class MethodInvoker<T, void, Args...> : public MethodInvokerBase
+    class ConstructorInvoker : public ConstructorInvokerBase
     {
     public:
-        using MethodType = void (T::*)(Args...);
+        ObjectHandle construct(const std::vector<Any> &args) const override
+        {
+            if (args.size() != sizeof...(Args))
+            {
+                throw ReflectionError(ReflectionErrorCode::ArgumentCountMismatch,
+                                      "构造参数数量不匹配");
+            }
+            return constructImpl(args, typename index_sequence_for<Args...>::type{});
+        }
 
-        explicit MethodInvoker(MethodType method);
-        Any invoke(const void *instance, const std::vector<Any> &args) const override;
-        std::size_t arity() const override;
-        std::vector<std::type_index> parameterTypes() const override;
-        std::type_index returnType() const override;
-        bool isConst() const override;
+        std::size_t arity() const override
+        {
+            return sizeof...(Args);
+        }
 
-    private:
-        MethodType method_;
-
-        template <std::size_t... Indexes>
-        Any invokeImpl(T *obj, const std::vector<Any> &args,
-                       index_sequence<Indexes...>) const;
-    };
-
-    template <typename T, typename ReturnType, typename... Args>
-    class ConstMethodInvoker : public MethodInvokerBase
-    {
-    public:
-        using MethodType = ReturnType (T::*)(Args...) const;
-
-        explicit ConstMethodInvoker(MethodType method);
-        Any invoke(const void *instance, const std::vector<Any> &args) const override;
-        std::size_t arity() const override;
-        std::vector<std::type_index> parameterTypes() const override;
-        std::type_index returnType() const override;
-        bool isConst() const override;
+        std::vector<std::type_index> parameterTypes() const override
+        {
+            return std::vector<std::type_index>{std::type_index(typeid(Args))...};
+        }
 
     private:
-        MethodType method_;
-
         template <std::size_t... Indexes>
-        Any invokeImpl(const T *obj, const std::vector<Any> &args,
-                       index_sequence<Indexes...>, std::false_type) const;
-
-        template <std::size_t... Indexes>
-        Any invokeImpl(const T *obj, const std::vector<Any> &args,
-                       index_sequence<Indexes...>, std::true_type) const;
+        ObjectHandle constructImpl(const std::vector<Any> &args,
+                                   index_sequence<Indexes...>) const
+        {
+            return ObjectHandle::create<T>(getParam<Args>(args[Indexes])...);
+        }
     };
 
     template <typename T>
@@ -227,6 +527,13 @@ namespace Evently
         typedef ObjectFactoryImpl<T> type;
     };
 
+    namespace detail
+    {
+        struct FreeFunctionTag
+        {
+        };
+    }
+
     class ReflectionRegistry
     {
     public:
@@ -247,6 +554,42 @@ namespace Evently
         void registerMethod(const std::string &className, const std::string &methodName,
                             ReturnType (T::*method)(Args...) const);
 
+        template <typename T, typename ReturnType, typename... Args>
+        void registerMethod(const std::string &className, const std::string &methodName,
+                            ReturnType (T::*method)(Args...) &);
+
+        template <typename T, typename ReturnType, typename... Args>
+        void registerMethod(const std::string &className, const std::string &methodName,
+                            ReturnType (T::*method)(Args...) const &);
+
+        template <typename T, typename ReturnType, typename... Args>
+        void registerMethod(const std::string &className, const std::string &methodName,
+                            ReturnType (T::*method)(Args...) &&);
+
+        template <typename T, typename ReturnType, typename... Args>
+        void registerMethod(const std::string &className, const std::string &methodName,
+                            ReturnType (T::*method)(Args...) const &&);
+
+#if EVENTLY_HAS_NOEXCEPT_FUNCTION_TYPE
+        template <typename T, typename ReturnType, typename... Args>
+        void registerMethod(const std::string &className, const std::string &methodName,
+                            ReturnType (T::*method)(Args...) noexcept);
+
+        template <typename T, typename ReturnType, typename... Args>
+        void registerMethod(const std::string &className, const std::string &methodName,
+                            ReturnType (T::*method)(Args...) const noexcept);
+#endif
+
+        template <typename ReturnType, typename... Args>
+        void registerFunction(const std::string &className,
+                              const std::string &functionName,
+                              ReturnType (*function)(Args...));
+
+        template <typename T, typename ReturnType, typename... Args>
+        void registerStaticMethod(const std::string &className,
+                                  const std::string &methodName,
+                                  ReturnType (*method)(Args...));
+
         template <typename T, typename FieldType>
         void registerField(const std::string &className, const std::string &fieldName,
                            FieldType T::*field);
@@ -266,7 +609,26 @@ namespace Evently
                                std::forward<Args>(args)...)));
         }
 
+        template <typename T, typename... Args>
+        void registerConstructor(const std::string &className)
+        {
+            addConstructor(std::type_index(typeid(T)), className,
+                           std::unique_ptr<ConstructorInvokerBase>(
+                               new ConstructorInvoker<T, Args...>()));
+        }
+
         ObjectHandle createInstance(const std::string &className) const;
+
+        ObjectHandle createInstance(const std::string &className,
+                                    const std::vector<Any> &args) const;
+
+        template <typename... Args>
+        ObjectHandle createInstanceWithArgs(const std::string &className,
+                                            Args &&...args) const
+        {
+            std::vector<Any> values{Any(std::forward<Args>(args))...};
+            return createInstance(className, values);
+        }
 
         template <typename T>
         std::string getClassName() const;
@@ -296,12 +658,20 @@ namespace Evently
                          const void *instance, const std::vector<Any> &args) const;
 
         Any invokeMethod(const std::string &className, const std::string &methodName,
+                         RvalueInstance instance, const std::vector<Any> &args) const;
+
+        Any invokeMethod(const std::string &className, const std::string &methodName,
                          std::nullptr_t instance, const std::vector<Any> &args) const;
+
+        Any invokeFunction(const std::string &className,
+                           const std::string &functionName,
+                           const std::vector<Any> &args) const;
 
         std::set<std::string> getMethodNames(const std::string &className) const;
 
         std::vector<FieldInfo> getFields(const std::string &className) const;
         std::vector<MethodInfo> getMethods(const std::string &className) const;
+        std::vector<ConstructorInfo> getConstructors(const std::string &className) const;
         std::vector<std::string> getClassNames() const;
         ClassInfo getClassInfo(const std::string &className) const;
 
@@ -309,6 +679,14 @@ namespace Evently
         bool isFrozen() const noexcept;
 
     private:
+        enum class InstanceKind
+        {
+            MutableLValue,
+            ConstLValue,
+            MutableRValue,
+            ConstRValue
+        };
+
         ReflectionRegistry();
         ReflectionRegistry(const ReflectionRegistry &) = delete;
         ReflectionRegistry &operator=(const ReflectionRegistry &) = delete;
@@ -326,12 +704,14 @@ namespace Evently
         void addMethod(const std::type_index &type, const std::string &className,
                        const std::string &methodName,
                        std::unique_ptr<MethodInvokerBase> invoker);
+        void addConstructor(const std::type_index &type, const std::string &className,
+                            std::unique_ptr<ConstructorInvokerBase> constructor);
         void addFactory(const std::type_index &type, const std::string &className,
                         std::unique_ptr<ObjectFactory> factory);
 
         Any invokeMethodImpl(const std::string &className,
                              const std::string &methodName,
-                             const void *instance, bool instanceIsConst,
+                             const void *instance, InstanceKind kind,
                              const std::vector<Any> &args) const;
 
         mutable std::mutex mutex_;
@@ -346,6 +726,10 @@ namespace Evently
                            std::vector<std::unique_ptr<MethodInvokerBase>>,
                            PairHash, PairEqual>
             methods_;
+
+        std::unordered_map<std::string,
+                           std::vector<std::unique_ptr<ConstructorInvokerBase>>>
+            constructors_;
 
         std::unordered_map<std::string, std::set<std::string>> methodNames_;
         std::unordered_map<std::type_index, std::string> classNames_;
@@ -363,181 +747,6 @@ namespace Evently
         static_assert(!std::is_rvalue_reference<ParamType>::value,
                       "rvalue reference parameters are not supported");
         return any_cast<ParamType>(arg);
-    }
-
-    template <typename T, typename ReturnType, typename... Args>
-    inline MethodInvoker<T, ReturnType, Args...>::MethodInvoker(MethodType method)
-        : method_(method) {}
-
-    template <typename T, typename ReturnType, typename... Args>
-    Any MethodInvoker<T, ReturnType, Args...>::invoke(
-        const void *instance, const std::vector<Any> &args) const
-    {
-        if (instance == nullptr)
-        {
-            throw ReflectionError(ReflectionErrorCode::InvalidInstance,
-                                  "实例指针不能为空");
-        }
-        if (args.size() != sizeof...(Args))
-        {
-            throw ReflectionError(ReflectionErrorCode::ArgumentCountMismatch,
-                                  "参数数量不匹配");
-        }
-        T *obj = const_cast<T *>(static_cast<const T *>(instance));
-        return invokeImpl(obj, args, typename index_sequence_for<Args...>::type{});
-    }
-
-    template <typename T, typename ReturnType, typename... Args>
-    template <std::size_t... Indexes>
-    inline Any MethodInvoker<T, ReturnType, Args...>::invokeImpl(
-        T *obj, const std::vector<Any> &args, index_sequence<Indexes...>) const
-    {
-        return Any((obj->*method_)(getParam<Args>(args[Indexes])...));
-    }
-
-    template <typename T, typename ReturnType, typename... Args>
-    std::size_t MethodInvoker<T, ReturnType, Args...>::arity() const
-    {
-        return sizeof...(Args);
-    }
-
-    template <typename T, typename ReturnType, typename... Args>
-    std::vector<std::type_index> MethodInvoker<T, ReturnType, Args...>::parameterTypes() const
-    {
-        return std::vector<std::type_index>{std::type_index(typeid(Args))...};
-    }
-
-    template <typename T, typename ReturnType, typename... Args>
-    std::type_index MethodInvoker<T, ReturnType, Args...>::returnType() const
-    {
-        return std::type_index(typeid(ReturnType));
-    }
-
-    template <typename T, typename ReturnType, typename... Args>
-    bool MethodInvoker<T, ReturnType, Args...>::isConst() const
-    {
-        return false;
-    }
-
-    template <typename T, typename... Args>
-    inline MethodInvoker<T, void, Args...>::MethodInvoker(MethodType method)
-        : method_(method) {}
-
-    template <typename T, typename... Args>
-    Any MethodInvoker<T, void, Args...>::invoke(
-        const void *instance, const std::vector<Any> &args) const
-    {
-        if (instance == nullptr)
-        {
-            throw ReflectionError(ReflectionErrorCode::InvalidInstance,
-                                  "实例指针不能为空");
-        }
-        if (args.size() != sizeof...(Args))
-        {
-            throw ReflectionError(ReflectionErrorCode::ArgumentCountMismatch,
-                                  "参数数量不匹配");
-        }
-        T *obj = const_cast<T *>(static_cast<const T *>(instance));
-        return invokeImpl(obj, args, typename index_sequence_for<Args...>::type{});
-    }
-
-    template <typename T, typename... Args>
-    template <std::size_t... Indexes>
-    inline Any MethodInvoker<T, void, Args...>::invokeImpl(
-        T *obj, const std::vector<Any> &args, index_sequence<Indexes...>) const
-    {
-        (obj->*method_)(getParam<Args>(args[Indexes])...);
-        return Any();
-    }
-
-    template <typename T, typename... Args>
-    std::size_t MethodInvoker<T, void, Args...>::arity() const
-    {
-        return sizeof...(Args);
-    }
-
-    template <typename T, typename... Args>
-    std::vector<std::type_index> MethodInvoker<T, void, Args...>::parameterTypes() const
-    {
-        return std::vector<std::type_index>{std::type_index(typeid(Args))...};
-    }
-
-    template <typename T, typename... Args>
-    std::type_index MethodInvoker<T, void, Args...>::returnType() const
-    {
-        return std::type_index(typeid(void));
-    }
-
-    template <typename T, typename... Args>
-    bool MethodInvoker<T, void, Args...>::isConst() const
-    {
-        return false;
-    }
-
-    template <typename T, typename ReturnType, typename... Args>
-    inline ConstMethodInvoker<T, ReturnType, Args...>::ConstMethodInvoker(MethodType method)
-        : method_(method) {}
-
-    template <typename T, typename ReturnType, typename... Args>
-    Any ConstMethodInvoker<T, ReturnType, Args...>::invoke(
-        const void *instance, const std::vector<Any> &args) const
-    {
-        if (instance == nullptr)
-        {
-            throw ReflectionError(ReflectionErrorCode::InvalidInstance,
-                                  "实例指针不能为空");
-        }
-        if (args.size() != sizeof...(Args))
-        {
-            throw ReflectionError(ReflectionErrorCode::ArgumentCountMismatch,
-                                  "参数数量不匹配");
-        }
-        const T *obj = static_cast<const T *>(instance);
-        return invokeImpl(obj, args, typename index_sequence_for<Args...>::type{},
-                          std::integral_constant<bool, std::is_void<ReturnType>::value>{});
-    }
-
-    template <typename T, typename ReturnType, typename... Args>
-    template <std::size_t... Indexes>
-    inline Any ConstMethodInvoker<T, ReturnType, Args...>::invokeImpl(
-        const T *obj, const std::vector<Any> &args, index_sequence<Indexes...>,
-        std::false_type) const
-    {
-        return Any((obj->*method_)(getParam<Args>(args[Indexes])...));
-    }
-
-    template <typename T, typename ReturnType, typename... Args>
-    template <std::size_t... Indexes>
-    inline Any ConstMethodInvoker<T, ReturnType, Args...>::invokeImpl(
-        const T *obj, const std::vector<Any> &args, index_sequence<Indexes...>,
-        std::true_type) const
-    {
-        (obj->*method_)(getParam<Args>(args[Indexes])...);
-        return Any();
-    }
-
-    template <typename T, typename ReturnType, typename... Args>
-    std::size_t ConstMethodInvoker<T, ReturnType, Args...>::arity() const
-    {
-        return sizeof...(Args);
-    }
-
-    template <typename T, typename ReturnType, typename... Args>
-    std::vector<std::type_index> ConstMethodInvoker<T, ReturnType, Args...>::parameterTypes() const
-    {
-        return std::vector<std::type_index>{std::type_index(typeid(Args))...};
-    }
-
-    template <typename T, typename ReturnType, typename... Args>
-    std::type_index ConstMethodInvoker<T, ReturnType, Args...>::returnType() const
-    {
-        return std::type_index(typeid(ReturnType));
-    }
-
-    template <typename T, typename ReturnType, typename... Args>
-    bool ConstMethodInvoker<T, ReturnType, Args...>::isConst() const
-    {
-        return true;
     }
 
     template <typename T, typename FieldType>
@@ -657,6 +866,89 @@ namespace Evently
         addMethod(std::type_index(typeid(T)), className, methodName,
                   std::unique_ptr<MethodInvokerBase>(
                       new ConstMethodInvoker<T, ReturnType, Args...>(method)));
+    }
+
+    template <typename T, typename ReturnType, typename... Args>
+    void ReflectionRegistry::registerMethod(const std::string &className,
+                                            const std::string &methodName,
+                                            ReturnType (T::*method)(Args...) &)
+    {
+        addMethod(std::type_index(typeid(T)), className, methodName,
+                  std::unique_ptr<MethodInvokerBase>(
+                      new LValueMethodInvoker<T, ReturnType, Args...>(method)));
+    }
+
+    template <typename T, typename ReturnType, typename... Args>
+    void ReflectionRegistry::registerMethod(const std::string &className,
+                                            const std::string &methodName,
+                                            ReturnType (T::*method)(Args...) const &)
+    {
+        addMethod(std::type_index(typeid(T)), className, methodName,
+                  std::unique_ptr<MethodInvokerBase>(
+                      new ConstLValueMethodInvoker<T, ReturnType, Args...>(method)));
+    }
+
+    template <typename T, typename ReturnType, typename... Args>
+    void ReflectionRegistry::registerMethod(const std::string &className,
+                                            const std::string &methodName,
+                                            ReturnType (T::*method)(Args...) &&)
+    {
+        addMethod(std::type_index(typeid(T)), className, methodName,
+                  std::unique_ptr<MethodInvokerBase>(
+                      new RValueMethodInvoker<T, ReturnType, Args...>(method)));
+    }
+
+    template <typename T, typename ReturnType, typename... Args>
+    void ReflectionRegistry::registerMethod(const std::string &className,
+                                            const std::string &methodName,
+                                            ReturnType (T::*method)(Args...) const &&)
+    {
+        addMethod(std::type_index(typeid(T)), className, methodName,
+                  std::unique_ptr<MethodInvokerBase>(
+                      new ConstRValueMethodInvoker<T, ReturnType, Args...>(method)));
+    }
+
+#if EVENTLY_HAS_NOEXCEPT_FUNCTION_TYPE
+    template <typename T, typename ReturnType, typename... Args>
+    void ReflectionRegistry::registerMethod(const std::string &className,
+                                            const std::string &methodName,
+                                            ReturnType (T::*method)(Args...) noexcept)
+    {
+        addMethod(std::type_index(typeid(T)), className, methodName,
+                  std::unique_ptr<MethodInvokerBase>(
+                      new NoexceptMethodInvoker<T, ReturnType, Args...>(method)));
+    }
+
+    template <typename T, typename ReturnType, typename... Args>
+    void ReflectionRegistry::registerMethod(const std::string &className,
+                                            const std::string &methodName,
+                                            ReturnType (T::*method)(Args...) const noexcept)
+    {
+        addMethod(std::type_index(typeid(T)), className, methodName,
+                  std::unique_ptr<MethodInvokerBase>(
+                      new ConstNoexceptMethodInvoker<T, ReturnType, Args...>(method)));
+    }
+#endif
+
+    template <typename ReturnType, typename... Args>
+    void ReflectionRegistry::registerFunction(const std::string &className,
+                                              const std::string &functionName,
+                                              ReturnType (*function)(Args...))
+    {
+        addMethod(std::type_index(typeid(detail::FreeFunctionTag)),
+                  className, functionName,
+                  std::unique_ptr<MethodInvokerBase>(
+                      new FunctionInvoker<ReturnType, Args...>(function)));
+    }
+
+    template <typename T, typename ReturnType, typename... Args>
+    void ReflectionRegistry::registerStaticMethod(const std::string &className,
+                                                  const std::string &methodName,
+                                                  ReturnType (*method)(Args...))
+    {
+        addMethod(std::type_index(typeid(T)), className, methodName,
+                  std::unique_ptr<MethodInvokerBase>(
+                      new FunctionInvoker<ReturnType, Args...>(method)));
     }
 
     template <typename T, typename FieldType>

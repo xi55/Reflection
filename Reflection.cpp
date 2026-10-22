@@ -140,6 +140,8 @@ namespace Evently
         {
             const MethodInvokerBase &existing = *candidates[index];
             if (existing.isConst() == invoker->isConst() &&
+                existing.isStatic() == invoker->isStatic() &&
+                existing.refQualifier() == invoker->refQualifier() &&
                 existing.arity() == invoker->arity() &&
                 existing.parameterTypes() == parameters)
             {
@@ -149,6 +151,41 @@ namespace Evently
         }
         candidates.push_back(std::move(invoker));
         methodNames_[className].insert(methodName);
+        ensureClassLocked(className);
+    }
+
+    void ReflectionRegistry::addConstructor(
+        const std::type_index &type, const std::string &className,
+        std::unique_ptr<ConstructorInvokerBase> constructor)
+    {
+        if (className.empty())
+        {
+            throw ReflectionError(ReflectionErrorCode::InvalidArgument,
+                                  "类名不能为空");
+        }
+        if (!constructor)
+        {
+            throw ReflectionError(ReflectionErrorCode::InvalidArgument,
+                                  "构造函数不能为空");
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        ensureMutableLocked();
+        checkClassNameOwnerLocked(type, className);
+        std::vector<std::unique_ptr<ConstructorInvokerBase>> &candidates =
+            constructors_[className];
+        const std::vector<std::type_index> parameters =
+            constructor->parameterTypes();
+        for (std::size_t index = 0; index < candidates.size(); ++index)
+        {
+            const ConstructorInvokerBase &existing = *candidates[index];
+            if (existing.arity() == constructor->arity() &&
+                existing.parameterTypes() == parameters)
+            {
+                throw ReflectionError(ReflectionErrorCode::DuplicateRegistration,
+                                      "构造函数重复注册");
+            }
+        }
+        candidates.push_back(std::move(constructor));
         ensureClassLocked(className);
     }
 
@@ -239,17 +276,120 @@ namespace Evently
     ObjectHandle ReflectionRegistry::createInstance(const std::string &className) const
     {
         ObjectFactory *factory = nullptr;
+        ConstructorInvokerBase *constructor = nullptr;
         {
             std::unique_lock<std::mutex> lock = readLock();
-            auto it = factories_.find(className);
-            if (it == factories_.end())
+            if (classNamesSet_.find(className) == classNamesSet_.end())
             {
                 throw ReflectionError(ReflectionErrorCode::ClassNotFound,
                                       "类未注册: " + className);
             }
-            factory = it->second.get();
+
+            auto factoryIt = factories_.find(className);
+            if (factoryIt != factories_.end())
+            {
+                factory = factoryIt->second.get();
+            }
+            else
+            {
+                auto constructorIt = constructors_.find(className);
+                if (constructorIt != constructors_.end())
+                {
+                    for (std::size_t index = 0;
+                         index < constructorIt->second.size(); ++index)
+                    {
+                        if (constructorIt->second[index]->arity() == 0)
+                        {
+                            constructor = constructorIt->second[index].get();
+                            break;
+                        }
+                    }
+                }
+                if (constructor == nullptr)
+                {
+                    throw ReflectionError(ReflectionErrorCode::ConstructorNotFound,
+                                          "未找到构造函数: " + className);
+                }
+            }
         }
-        return factory->create();
+        if (factory != nullptr)
+        {
+            return factory->create();
+        }
+        return constructor->construct(std::vector<Any>());
+    }
+
+    ObjectHandle ReflectionRegistry::createInstance(
+        const std::string &className, const std::vector<Any> &args) const
+    {
+        ConstructorInvokerBase *selected = nullptr;
+        bool arityMatched = false;
+        bool typeMatched = false;
+        {
+            std::unique_lock<std::mutex> lock = readLock();
+            if (classNamesSet_.find(className) == classNamesSet_.end())
+            {
+                throw ReflectionError(ReflectionErrorCode::ClassNotFound,
+                                      "类未注册: " + className);
+            }
+            auto it = constructors_.find(className);
+            if (it == constructors_.end())
+            {
+                throw ReflectionError(ReflectionErrorCode::ConstructorNotFound,
+                                      "未找到构造函数: " + className);
+            }
+
+            for (std::size_t index = 0; index < it->second.size(); ++index)
+            {
+                const ConstructorInvokerBase &candidate = *it->second[index];
+                if (candidate.arity() != args.size())
+                {
+                    continue;
+                }
+                arityMatched = true;
+
+                const std::vector<std::type_index> parameters =
+                    candidate.parameterTypes();
+                bool matches = true;
+                for (std::size_t argIndex = 0; argIndex < args.size(); ++argIndex)
+                {
+                    if (parameters[argIndex] !=
+                        std::type_index(args[argIndex].type()))
+                    {
+                        matches = false;
+                        break;
+                    }
+                }
+                if (!matches)
+                {
+                    continue;
+                }
+                typeMatched = true;
+                if (selected != nullptr)
+                {
+                    throw ReflectionError(ReflectionErrorCode::AmbiguousConstructor,
+                                          "构造函数重载不明确: " + className);
+                }
+                selected = it->second[index].get();
+            }
+        }
+
+        if (selected == nullptr)
+        {
+            if (!arityMatched)
+            {
+                throw ReflectionError(ReflectionErrorCode::ArgumentCountMismatch,
+                                      "构造参数数量不匹配");
+            }
+            if (!typeMatched)
+            {
+                throw ReflectionError(ReflectionErrorCode::ArgumentTypeMismatch,
+                                      "构造参数类型不匹配");
+            }
+            throw ReflectionError(ReflectionErrorCode::ConstructorNotFound,
+                                  "未找到构造函数: " + className);
+        }
+        return selected->construct(args);
     }
 
     PropertySetterBase *ReflectionRegistry::getSetter(const std::string &className,
@@ -342,7 +482,8 @@ namespace Evently
                                          void *instance,
                                          const std::vector<Any> &args) const
     {
-        return invokeMethodImpl(className, methodName, instance, false, args);
+        return invokeMethodImpl(className, methodName, instance,
+                                InstanceKind::MutableLValue, args);
     }
 
     Any ReflectionRegistry::invokeMethod(const std::string &className,
@@ -350,7 +491,20 @@ namespace Evently
                                          const void *instance,
                                          const std::vector<Any> &args) const
     {
-        return invokeMethodImpl(className, methodName, instance, true, args);
+        return invokeMethodImpl(className, methodName, instance,
+                                InstanceKind::ConstLValue, args);
+    }
+
+    Any ReflectionRegistry::invokeMethod(const std::string &className,
+                                         const std::string &methodName,
+                                         RvalueInstance instance,
+                                         const std::vector<Any> &args) const
+    {
+        return invokeMethodImpl(
+            className, methodName, instance.get(),
+            instance.isConst() ? InstanceKind::ConstRValue
+                               : InstanceKind::MutableRValue,
+            args);
     }
 
     Any ReflectionRegistry::invokeMethod(const std::string &className,
@@ -358,13 +512,17 @@ namespace Evently
                                          std::nullptr_t,
                                          const std::vector<Any> &args) const
     {
-        return invokeMethodImpl(className, methodName, nullptr, true, args);
+        (void)className;
+        (void)methodName;
+        (void)args;
+        throw ReflectionError(ReflectionErrorCode::InvalidInstance,
+                              "实例指针不能为空");
     }
 
     Any ReflectionRegistry::invokeMethodImpl(const std::string &className,
                                              const std::string &methodName,
                                              const void *instance,
-                                             bool instanceIsConst,
+                                             InstanceKind kind,
                                              const std::vector<Any> &args) const
     {
         if (instance == nullptr)
@@ -374,9 +532,11 @@ namespace Evently
         }
 
         MethodInvokerBase *selected = nullptr;
+        int bestRank = 0;
         bool arityMatched = false;
         bool typeMatched = false;
-        bool constMismatch = false;
+        bool qualifierMismatch = false;
+        bool ambiguous = false;
         {
             std::unique_lock<std::mutex> lock = readLock();
             if (classNamesSet_.find(className) == classNamesSet_.end())
@@ -393,9 +553,29 @@ namespace Evently
 
             const std::vector<std::unique_ptr<MethodInvokerBase>> &candidates =
                 it->second;
+            bool hasNonStatic = false;
+            for (std::size_t index = 0; index < candidates.size(); ++index)
+            {
+                if (!candidates[index]->isStatic())
+                {
+                    hasNonStatic = true;
+                    break;
+                }
+            }
+            if (!hasNonStatic)
+            {
+                throw ReflectionError(ReflectionErrorCode::MethodNotFound,
+                                      "未找到成员方法: " + className + "::" +
+                                          methodName);
+            }
+
             for (std::size_t index = 0; index < candidates.size(); ++index)
             {
                 const MethodInvokerBase &candidate = *candidates[index];
+                if (candidate.isStatic())
+                {
+                    continue;
+                }
                 if (candidate.arity() != args.size())
                 {
                     continue;
@@ -420,34 +600,211 @@ namespace Evently
                 }
                 typeMatched = true;
 
-                if (instanceIsConst && !candidate.isConst())
+                const bool isConstMethod = candidate.isConst();
+                const RefQualifier qualifier = candidate.refQualifier();
+                int rank = -1;
+                switch (kind)
                 {
-                    constMismatch = true;
-                    continue;
-                }
-                if (!instanceIsConst && candidate.isConst())
-                {
-                    if (selected == nullptr)
+                case InstanceKind::MutableLValue:
+                    if (qualifier == RefQualifier::LValue && !isConstMethod)
                     {
-                        selected = candidates[index].get();
+                        rank = 0;
                     }
-                    continue;
-                }
-                if (!instanceIsConst && !candidate.isConst())
-                {
-                    selected = candidates[index].get();
+                    else if (qualifier == RefQualifier::None && !isConstMethod)
+                    {
+                        rank = 1;
+                    }
+                    else if (qualifier == RefQualifier::ConstLValue &&
+                             isConstMethod)
+                    {
+                        rank = 2;
+                    }
+                    else if (qualifier == RefQualifier::None && isConstMethod)
+                    {
+                        rank = 3;
+                    }
+                    break;
+                case InstanceKind::ConstLValue:
+                    if (qualifier == RefQualifier::ConstLValue && isConstMethod)
+                    {
+                        rank = 0;
+                    }
+                    else if (qualifier == RefQualifier::None && isConstMethod)
+                    {
+                        rank = 1;
+                    }
+                    break;
+                case InstanceKind::MutableRValue:
+                    if (qualifier == RefQualifier::RValue && !isConstMethod)
+                    {
+                        rank = 0;
+                    }
+                    else if (qualifier == RefQualifier::None && !isConstMethod)
+                    {
+                        rank = 1;
+                    }
+                    else if (qualifier == RefQualifier::ConstRValue &&
+                             isConstMethod)
+                    {
+                        rank = 2;
+                    }
+                    else if (qualifier == RefQualifier::None && isConstMethod)
+                    {
+                        rank = 3;
+                    }
+                    else if (qualifier == RefQualifier::ConstLValue &&
+                             isConstMethod)
+                    {
+                        rank = 4;
+                    }
+                    break;
+                case InstanceKind::ConstRValue:
+                    if (qualifier == RefQualifier::ConstRValue && isConstMethod)
+                    {
+                        rank = 0;
+                    }
+                    else if (qualifier == RefQualifier::None && isConstMethod)
+                    {
+                        rank = 1;
+                    }
+                    else if (qualifier == RefQualifier::ConstLValue &&
+                             isConstMethod)
+                    {
+                        rank = 2;
+                    }
                     break;
                 }
-                if (instanceIsConst && candidate.isConst())
+
+                if (rank < 0)
                 {
-                    if (selected != nullptr)
-                    {
-                        throw ReflectionError(ReflectionErrorCode::AmbiguousMethod,
-                                              "方法重载不明确: " +
-                                                  className + "::" + methodName);
-                    }
-                    selected = candidates[index].get();
+                    qualifierMismatch = true;
+                    continue;
                 }
+                if (selected == nullptr || rank < bestRank)
+                {
+                    selected = candidates[index].get();
+                    bestRank = rank;
+                }
+                else if (rank == bestRank)
+                {
+                    ambiguous = true;
+                }
+            }
+        }
+
+        if (ambiguous)
+        {
+            throw ReflectionError(ReflectionErrorCode::AmbiguousMethod,
+                                  "方法重载不明确: " + className + "::" +
+                                      methodName);
+        }
+        if (selected == nullptr)
+        {
+            if (!arityMatched)
+            {
+                throw ReflectionError(ReflectionErrorCode::ArgumentCountMismatch,
+                                      "参数数量不匹配");
+            }
+            if (!typeMatched)
+            {
+                throw ReflectionError(ReflectionErrorCode::ArgumentTypeMismatch,
+                                      "参数类型不匹配");
+            }
+            if (qualifierMismatch)
+            {
+                throw ReflectionError(ReflectionErrorCode::InvalidInstance,
+                                      "实例的 const/值类别与成员函数限定不匹配");
+            }
+            throw ReflectionError(ReflectionErrorCode::MethodNotFound,
+                                  "方法未注册: " + className + "::" + methodName);
+        }
+
+        try
+        {
+            return selected->invoke(instance, args);
+        }
+        catch (const bad_any_cast &error)
+        {
+            throw ReflectionError(ReflectionErrorCode::ArgumentTypeMismatch,
+                                  error.what());
+        }
+    }
+
+    Any ReflectionRegistry::invokeFunction(
+        const std::string &className, const std::string &functionName,
+        const std::vector<Any> &args) const
+    {
+        MethodInvokerBase *selected = nullptr;
+        bool arityMatched = false;
+        bool typeMatched = false;
+        {
+            std::unique_lock<std::mutex> lock = readLock();
+            if (classNamesSet_.find(className) == classNamesSet_.end())
+            {
+                throw ReflectionError(ReflectionErrorCode::ClassNotFound,
+                                      "类未注册: " + className);
+            }
+            auto it = methods_.find(std::make_pair(className, functionName));
+            if (it == methods_.end())
+            {
+                throw ReflectionError(ReflectionErrorCode::MethodNotFound,
+                                      "函数未注册: " + className + "::" +
+                                          functionName);
+            }
+
+            bool hasStatic = false;
+            for (std::size_t index = 0; index < it->second.size(); ++index)
+            {
+                if (it->second[index]->isStatic())
+                {
+                    hasStatic = true;
+                    break;
+                }
+            }
+            if (!hasStatic)
+            {
+                throw ReflectionError(ReflectionErrorCode::MethodNotFound,
+                                      "未找到静态函数: " + className + "::" +
+                                          functionName);
+            }
+
+            for (std::size_t index = 0; index < it->second.size(); ++index)
+            {
+                const MethodInvokerBase &candidate = *it->second[index];
+                if (!candidate.isStatic())
+                {
+                    continue;
+                }
+                if (candidate.arity() != args.size())
+                {
+                    continue;
+                }
+                arityMatched = true;
+
+                const std::vector<std::type_index> parameters =
+                    candidate.parameterTypes();
+                bool matches = true;
+                for (std::size_t argIndex = 0; argIndex < args.size(); ++argIndex)
+                {
+                    if (parameters[argIndex] !=
+                        std::type_index(args[argIndex].type()))
+                    {
+                        matches = false;
+                        break;
+                    }
+                }
+                if (!matches)
+                {
+                    continue;
+                }
+                typeMatched = true;
+                if (selected != nullptr)
+                {
+                    throw ReflectionError(ReflectionErrorCode::AmbiguousMethod,
+                                          "函数重载不明确: " + className + "::" +
+                                              functionName);
+                }
+                selected = it->second[index].get();
             }
         }
 
@@ -463,18 +820,14 @@ namespace Evently
                 throw ReflectionError(ReflectionErrorCode::ArgumentTypeMismatch,
                                       "参数类型不匹配");
             }
-            if (constMismatch)
-            {
-                throw ReflectionError(ReflectionErrorCode::InvalidInstance,
-                                      "const 实例不能调用非 const 方法");
-            }
             throw ReflectionError(ReflectionErrorCode::MethodNotFound,
-                                  "方法未注册: " + className + "::" + methodName);
+                                  "未找到静态函数: " + className + "::" +
+                                      functionName);
         }
 
         try
         {
-            return selected->invoke(instance, args);
+            return selected->invoke(nullptr, args);
         }
         catch (const bad_any_cast &error)
         {
@@ -545,10 +898,35 @@ namespace Evently
                                              invoker.arity(),
                                              invoker.parameterTypes(),
                                              invoker.returnType(),
-                                             invoker.isConst()));
+                                             invoker.isConst(),
+                                             invoker.isStatic(),
+                                             invoker.refQualifier()));
             }
         }
         return methods;
+    }
+
+    std::vector<ConstructorInfo> ReflectionRegistry::getConstructors(
+        const std::string &className) const
+    {
+        std::unique_lock<std::mutex> lock = readLock();
+        if (classNamesSet_.find(className) == classNamesSet_.end())
+        {
+            throw ReflectionError(ReflectionErrorCode::ClassNotFound,
+                                  "类未注册: " + className);
+        }
+        std::vector<ConstructorInfo> constructors;
+        auto it = constructors_.find(className);
+        if (it != constructors_.end())
+        {
+            for (std::size_t index = 0; index < it->second.size(); ++index)
+            {
+                const ConstructorInvokerBase &constructor = *it->second[index];
+                constructors.push_back(ConstructorInfo(
+                    constructor.arity(), constructor.parameterTypes()));
+            }
+        }
+        return constructors;
     }
 
     std::vector<std::string> ReflectionRegistry::getClassNames() const
@@ -590,7 +968,21 @@ namespace Evently
                                                   invoker.arity(),
                                                   invoker.parameterTypes(),
                                                   invoker.returnType(),
-                                                  invoker.isConst()));
+                                                  invoker.isConst(),
+                                                  invoker.isStatic(),
+                                                  invoker.refQualifier()));
+            }
+        }
+        auto constructorIt = constructors_.find(className);
+        if (constructorIt != constructors_.end())
+        {
+            for (std::size_t index = 0; index < constructorIt->second.size();
+                 ++index)
+            {
+                const ConstructorInvokerBase &constructor =
+                    *constructorIt->second[index];
+                info.constructors.push_back(ConstructorInfo(
+                    constructor.arity(), constructor.parameterTypes()));
             }
         }
         return info;

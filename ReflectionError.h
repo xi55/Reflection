@@ -21,7 +21,9 @@ namespace Evently
         ArgumentCountMismatch,
         ArgumentTypeMismatch,
         DuplicateRegistration,
-        AmbiguousMethod
+        AmbiguousMethod,
+        ConstructorNotFound,
+        AmbiguousConstructor
     };
 
     class ReflectionError : public std::runtime_error
